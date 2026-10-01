@@ -11,6 +11,9 @@
 ### 📨 Send every message type
 Text · Photo · Animation (GIF) · Video · Document · Audio · Voice · Video note · Sticker · Location · Contact · Poll · Dice · Reaction
 
+### 💬 Custom reactions
+Optionally restrict the reaction menu to your own set via `reactions.txt` (emoji + label per line). If absent, the full built-in Telegram reaction list is used.
+
 ### 🛠 Message management
 Edit · Delete · Pin · Unpin · Forward · Chat actions (typing / uploading)
 
@@ -86,6 +89,26 @@ If the file is missing or empty, `termgram` connects directly.
 
 ---
 
+### 3. Custom reactions (optional)
+
+By default, `termgram` loads the **full built-in Telegram reaction list** (👍 ❤️ 🔥 …). If you want to narrow it down to only the reactions you care about — for example the ones your bot has unlocked, or a curated shortlist — create a file named `reactions.txt` in the project root.
+
+Each line defines one reaction. The **first character is the emoji**, followed by a **space**, and then the **name/description** you want shown in the menu:
+
+```
+👍 Like
+❤️ Love
+🔥 Fire
+🎉 Party
+😢 Sad
+```
+
+- The first character (emoji) is what gets sent to Telegram.
+- Everything after the first space is just a label shown in the numbered menu.
+- Lines starting with `#` are treated as comments and ignored.
+
+> 💡 `reactions.txt` is **not** auto-created. If it is missing or empty, the full built-in reaction list is used.
+
 ## ▶️ Usage
 
 ```bash
@@ -117,8 +140,6 @@ Just pick a number and follow the prompts.
 
 ---
 
-## 📂 Files
-
 | File | Purpose | Committed? |
 |---|---|---|
 | `termgram.py` | Main program | ✅ |
@@ -127,8 +148,10 @@ Just pick a number and follow the prompts.
 | `LICENSE` | MIT license | ✅ |
 | `token.txt.example` | Token template | ✅ |
 | `proxy.txt.example` | Proxy template | ✅ |
+| `reactions.txt.example` | Reactions template | ✅ |
 | `token.txt` | Your real token | ❌ (gitignored) |
 | `proxy.txt` | Your real proxy | ❌ (gitignored) |
+| `reactions.txt` | Your custom reactions | ❌ (gitignored) |
 | `tg.db` | Local message database | ❌ (gitignored) |
 
 ---

@@ -2,6 +2,7 @@
 token.txt
 proxy.txt
 tg.db
+reactions.txt
 *.sqlite3
 u.txt
 
