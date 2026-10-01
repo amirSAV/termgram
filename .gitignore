@@ -3,6 +3,7 @@ token.txt
 proxy.txt
 tg.db
 *.sqlite3
+u.txt
 
 # --- Python ---
 __pycache__/
