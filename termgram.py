@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 import requests
 from typing import Optional, Dict, Any, List, Tuple
 
+# ============ App info ============
+APP_NAME    = "termgram"
+APP_VERSION = "1.0.0"
+APP_TAGLINE = "Terminal client for Telegram bots"
+
 # ============ Configuration ============
 TOKEN_FILE = "token.txt"
 PROXY_FILE = "proxy.txt"
@@ -57,6 +62,23 @@ TELEGRAM_REACTIONS: List[Tuple[str, str]] = [
     ("💸", "Money with Wings"),     ("🫠", "Melting Face"),
     ("😼", "Cat Wry Smile"),        ("🤝", "Handshake"),
 ]
+
+def ensure_reactions_file() -> None:
+    if os.path.isfile(REACTIONS_FILE):
+        return
+    try:
+        with open(REACTIONS_FILE, "w", encoding="utf-8") as f:
+            f.write("# termgram reactions file\n")
+            f.write("# Format: <emoji> <label>   (one per line)\n")
+            f.write("# The FIRST token is the emoji that gets sent to Telegram.\n")
+            f.write("# Everything after the first space is just a label.\n")
+            f.write("# Lines starting with # are ignored.\n")
+            f.write("# Edit this file while termgram is running — it reloads automatically.\n\n")
+            for emoji, name in TELEGRAM_REACTIONS:
+                f.write(f"{emoji} {name}\n")
+        print(f"{G}✔ Created {REACTIONS_FILE} with {len(TELEGRAM_REACTIONS)} reactions{N}")
+    except Exception as e:
+        print(f"{Y}⚠ Could not create {REACTIONS_FILE}: {e}{N}")
 
 # ============ Colors ============
 G = '\033[32m'
@@ -592,8 +614,47 @@ def read_text_or_file(field: str) -> str:
         else:
             print(f"{R}invalid choice (t/f){N}")
 
+def ask_inline_buttons() -> Optional[str]:
+    print(f"\n{B}--- Inline URL buttons (optional) ---{N}")
+    ans = input(f"{Y}Add inline URL buttons under this message? [y/N]: {N}").strip().lower()
+    if ans != "y":
+        return None
 
-def read_common() -> Optional[dict]:
+    print(f"{B}Add buttons row by row. Empty row number = finish.{N}")
+    print(f"{Y}Tip:{N} multiple buttons in one row appear side by side.\n")
+
+    rows: List[List[dict]] = []
+    row_num = 1
+    while True:
+        raw = input(f"{B}Row {row_num} — number of buttons (empty = finish): {N}").strip()
+        if not raw:
+            break
+        if not raw.isdigit() or int(raw) <= 0:
+            print(f"{R}enter a positive number or leave empty to finish{N}")
+            continue
+        n = int(raw)
+        row: List[dict] = []
+        for i in range(1, n + 1):
+            text = input(f"  button {i} — text (e.g. 🌐 Website): ").strip()
+            url = input(f"  button {i} — url  (https://...): ").strip()
+            if not text or not url:
+                print(f"{R}both text and url are required — skipping this button{N}")
+                continue
+            if not (url.startswith("http://") or url.startswith("https://")
+                    or url.startswith("tg://")):
+                print(f"{Y}⚠ URL usually should start with http(s):// or tg://{N}")
+            row.append({"text": text, "url": url})
+        if row:
+            rows.append(row)
+            row_num += 1
+
+    if not rows:
+        return None
+    markup = json.dumps({"inline_keyboard": rows}, ensure_ascii=False)
+    print(f"{G}✔ {sum(len(r) for r in rows)} button(s) in {len(rows)} row(s) attached.{N}")
+    return markup
+
+def read_common(allow_buttons: bool = True) -> Optional[dict]:
     print(f"\n{B}--- Common fields ---{N}")
     chat_id = input("chat_id (number or @username): ").strip()
     if not chat_id:
@@ -605,12 +666,16 @@ def read_common() -> Optional[dict]:
     disable_notif = ans.lower() == "y"
     ans = input("protect_content? [y/N]: ").strip()
     protect = ans.lower() == "y"
+
+    reply_markup = ask_inline_buttons() if allow_buttons else None
+
     return {
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
         "parse_mode": parse_mode,
         "disable_notification": disable_notif,
         "protect_content": protect,
+        "reply_markup": reply_markup,
     }
 
 
@@ -624,6 +689,8 @@ def build_data(common: dict, extra: dict = None) -> dict:
         data["disable_notification"] = "true"
     if common.get("protect_content"):
         data["protect_content"] = "true"
+    if common.get("reply_markup"):
+        data["reply_markup"] = common["reply_markup"]
     if extra:
         data.update(extra)
     return data
@@ -679,6 +746,7 @@ def show_info_result(result: Optional[dict]):
         print(f"{R}✘ Failed:{N}")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
+_REACTIONS_CACHE: Dict[str, Any] = {"mtime": None, "size": None, "data": None}
 
 def load_reactions() -> List[Tuple[str, str]]:
     """Load reactions from reactions.txt if present, otherwise the built-in list."""
@@ -891,7 +959,7 @@ def send_voice(bot: TelegramBot):
 
 
 def send_video_note(bot: TelegramBot):
-    common = read_common()
+    common = read_common(allow_buttons=False)
     if not common:
         return
     value, files = handle_file_field("video_note")
@@ -2919,8 +2987,18 @@ def main_menu(bot: TelegramBot):
 # ================================================================
 #  Entry point
 # ================================================================
+def print_banner() -> None:
+    line = "═" * 52
+    print(f"{G}╔{line}╗{N}")
+    print(f"{G}║{N}  {B}📡 {APP_NAME}{N}  {Y}v{APP_VERSION}{N}"
+          f"{' ' * (52 - len(APP_NAME) - len(APP_VERSION) - 8)}{G}║{N}")
+    print(f"{G}║{N}  {M}{APP_TAGLINE}{N}"
+          f"{' ' * (52 - len(APP_TAGLINE) - 2)}{G}║{N}")
+    print(f"{G}╚{line}╝{N}")
 def main():
     global PROXY
+
+    print_banner()
 
     if not os.path.isfile(TOKEN_FILE):
         print(f"ERROR: token file not found: {TOKEN_FILE}", file=sys.stderr)
@@ -2932,6 +3010,7 @@ def main():
         print("ERROR: token is empty", file=sys.stderr)
         sys.exit(1)
 
+    ensure_reactions_file()
     proxy_url = ""
     if os.path.isfile(PROXY_FILE):
         with open(PROXY_FILE, encoding="utf-8") as f:
