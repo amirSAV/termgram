@@ -15,12 +15,13 @@ import time
 import sqlite3
 import random
 from datetime import datetime, timezone
+import argparse
 import requests
 from typing import Optional, Dict, Any, List, Tuple
 
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
@@ -1886,31 +1887,78 @@ def chat_explorer(bot: TelegramBot):
         conn.close()
 
 def reply_in_other_chat(bot: TelegramBot):
+    """Reply to a message that lives in another chat.
+       Since Telegram doesn't allow cross-chat replies directly,
+       we first copy the source message to the target chat and
+       then reply to that newly created copy."""
     print(f"\n{B}--- Reply to a Message in Another Chat ---{N}")
-    chat_id = input("target chat_id (number or @username): ").strip()
-    if not chat_id:
-        print(f"{R}chat_id is required{N}")
+
+    # 1) source message (where the original message lives)
+    src_chat_id = input("source chat_id (original message chat): ").strip()
+    if not src_chat_id:
+        print(f"{R}source chat_id is required{N}")
         return
-    msg_id = input("message_id to reply to: ").strip()
-    if not msg_id:
-        print(f"{R}message_id is required{N}")
+    src_msg_id = input("source message_id (message to reply to): ").strip()
+    if not src_msg_id:
+        print(f"{R}source message_id is required{N}")
         return
+
+    # 2) target chat (where the reply should go)
+    dst_chat_id = input("target chat_id (where to send the reply): ").strip()
+    if not dst_chat_id:
+        print(f"{R}target chat_id is required{N}")
+        return
+
+    # 3) reply text
     text = read_text_or_file("text")
     if not text:
         print(f"{R}text is empty{N}")
         return
+
     parse_mode = input("parse_mode [Markdown/HTML/MarkdownV2] (empty = none): ").strip() or None
     ans = input("disable_notification? [y/N]: ").strip()
+    disable_notif = ans.lower() == "y"
+
+    # --- Case A: same chat — plain reply works natively ---
+    if str(src_chat_id) == str(dst_chat_id):
+        data = {
+            "chat_id": dst_chat_id,
+            "text": text,
+            "reply_to_message_id": src_msg_id,
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        if disable_notif:
+            data["disable_notification"] = "true"
+        print(f"\n{Y}>> sendMessage (same-chat reply) ...{N}")
+        show_send_result(bot.post("sendMessage", data=data))
+        return
+
+    # --- Case B: cross-chat — copy source msg first, then reply to the copy ---
+    print(f"\n{Y}>> copyMessage (source → target) ...{N}")
+    copy_resp = bot.post("copyMessage", data={
+        "chat_id": dst_chat_id,
+        "from_chat_id": src_chat_id,
+        "message_id": src_msg_id,
+    })
+    if not copy_resp or not copy_resp.get("ok"):
+        print(f"{R}✘ copyMessage failed — cannot reply cross-chat{N}")
+        show_info_result(copy_resp)
+        return
+    new_msg_id = copy_resp["result"]["message_id"]
+    print(f"{G}✔ Copied as new message_id={new_msg_id} in target chat{N}")
+
+    # now reply to the copied message
     data = {
-        "chat_id": chat_id,
+        "chat_id": dst_chat_id,
         "text": text,
-        "reply_to_message_id": msg_id,
+        "reply_to_message_id": str(new_msg_id),
     }
     if parse_mode:
         data["parse_mode"] = parse_mode
-    if ans.lower() == "y":
+    if disable_notif:
         data["disable_notification"] = "true"
-    print(f"\n{Y}>> sendMessage (reply) ...{N}")
+    print(f"\n{Y}>> sendMessage (reply to copy) ...{N}")
     show_send_result(bot.post("sendMessage", data=data))
 
 
@@ -2148,6 +2196,62 @@ def set_profile_photo(bot: TelegramBot):
         print(f"{R}✘ Failed (requires Bot API 9.2+):{N}")
         show_info_result(result)
 
+def get_bot_profile(bot: TelegramBot):
+    """Fetch the bot's current profile: name, description,
+       short description, and profile photos."""
+    print(f"\n{B}--- Bot Profile ---{N}")
+
+    # 1) basic identity
+    print(f"\n{Y}>> getMe ...{N}")
+    me = bot.post("getMe")
+    if not me or not me.get("ok"):
+        show_info_result(me)
+        return
+    bot_user = me["result"]
+    bot_id = bot_user["id"]
+    print(f"{G}✔ getMe:{N}")
+    print(json.dumps(bot_user, indent=2, ensure_ascii=False))
+
+    # 2) name (Bot API 9.0+)
+    print(f"\n{Y}>> getMyName ...{N}")
+    r = bot.post("getMyName")
+    if r and r.get("ok"):
+        print(json.dumps(r["result"], indent=2, ensure_ascii=False))
+    else:
+        print(f"{Y}⚠ getMyName not available (needs Bot API 9.0+){N}")
+
+    # 3) description / bio
+    print(f"\n{Y}>> getMyDescription ...{N}")
+    r = bot.post("getMyDescription")
+    if r and r.get("ok"):
+        print(json.dumps(r["result"], indent=2, ensure_ascii=False))
+    else:
+        print(f"{Y}⚠ getMyDescription not available{N}")
+
+    # 4) short description
+    print(f"\n{Y}>> getMyShortDescription ...{N}")
+    r = bot.post("getMyShortDescription")
+    if r and r.get("ok"):
+        print(json.dumps(r["result"], indent=2, ensure_ascii=False))
+    else:
+        print(f"{Y}⚠ getMyShortDescription not available{N}")
+
+    # 5) profile photos (uses the bot's own user_id)
+    print(f"\n{Y}>> getUserProfilePhotos (self) ...{N}")
+    r = bot.post("getUserProfilePhotos", data={"user_id": str(bot_id), "limit": "1"})
+    if r and r.get("ok"):
+        photos = r["result"].get("photos") or []
+        if not photos:
+            print(f"{Y}No profile photo set.{N}")
+        else:
+            # show only the largest size of the latest photo
+            largest = max(photos[0], key=lambda p: p.get("file_size", 0))
+            print(f"{G}✔ Current profile photo:{N}")
+            print(json.dumps(largest, indent=2, ensure_ascii=False))
+            print(f"{Y}Tip:{N} use menu 37 (Download by id) to download "
+                  f"file_id = {largest.get('file_id')}")
+    else:
+        show_info_result(r)
 
 def remove_profile_photo(bot: TelegramBot):
     print(f"\n{B}--- Remove Bot Profile Photo ---{N}")
@@ -2900,6 +3004,7 @@ def main_menu(bot: TelegramBot):
         print(f"{B}--- Bot Profile -----------------------------------{N}")
         print_menu_row(33, "Set bio (desc)", 34, "Set short bio")
         print_menu_row(35, "Set profile photo", 36, "Remove photo")
+        print("  49) Get current profile")
         print(f"{B}--- Files -----------------------------------------{N}")
         print_menu_row(37, "Download by id", 38, "Upload & get id")
         print(f"{B}--- Monitor ---------------------------------------{N}")
@@ -2985,6 +3090,161 @@ def main_menu(bot: TelegramBot):
 
 
 # ================================================================
+#  CLI mode (non-interactive)
+# ================================================================
+def _read_caption_arg(inline_caption: Optional[str],
+                      caption_file: Optional[str]) -> str:
+    """Return caption text either from --caption or from --caption-file."""
+    if caption_file:
+        if not os.path.isfile(caption_file):
+            print(f"{R}caption file not found: {caption_file}{N}", file=sys.stderr)
+            sys.exit(2)
+        with open(caption_file, encoding="utf-8") as f:
+            return f.read()
+    return inline_caption or ""
+
+
+def _cli_send_file(bot: TelegramBot, method: str, field: str,
+                   chat_id: str, path: str, caption: str,
+                   reply_to: Optional[int] = None,
+                   parse_mode: Optional[str] = None) -> int:
+    """Generic file sender used by several CLI subcommands."""
+    data = {"chat_id": chat_id}
+    files = None
+    if path and os.path.isfile(path):
+        files = {field: (os.path.basename(path), open(path, "rb"), guess_mime(path))}
+    elif path:
+        data[field] = path  # file_id or URL
+    if caption:
+        data["caption"] = caption
+    if reply_to is not None:
+        data["reply_to_message_id"] = str(reply_to)
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    resp = bot.post(method, data=data, files=files, ask_retry=False)
+    show_send_result(resp)
+    return 0 if (resp and resp.get("ok")) else 1
+
+
+def run_cli(bot: TelegramBot, argv: List[str]) -> int:
+    """Parse argv and execute a one-shot command. Return exit code."""
+    parser = argparse.ArgumentParser(
+        prog=APP_NAME,
+        description=f"{APP_TAGLINE} — CLI mode",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    # ---- text ----
+    p = sub.add_parser("text", help="send a text message")
+    p.add_argument("chat_id")
+    p.add_argument("text")
+    p.add_argument("--reply-to", type=int, default=None)
+    p.add_argument("--parse-mode", default=None)
+
+    # ---- photo / document / video / audio / voice / animation ----
+    for name, method, field in (
+        ("photo",     "sendPhoto",     "photo"),
+        ("document",  "sendDocument",  "document"),
+        ("video",     "sendVideo",     "video"),
+        ("audio",     "sendAudio",     "audio"),
+        ("voice",     "sendVoice",     "voice"),
+        ("animation", "sendAnimation", "animation"),
+    ):
+        sp = sub.add_parser(name, help=f"send a {name}")
+        sp.add_argument("chat_id")
+        sp.add_argument("path", help="local file path, URL, or file_id")
+        sp.add_argument("--caption", default=None,
+                        help="caption text (inline)")
+        sp.add_argument("--caption-file", default=None,
+                        help="read caption from this .txt file")
+        sp.add_argument("--reply-to", type=int, default=None)
+        sp.add_argument("--parse-mode", default=None)
+
+    # ---- react ----
+    sp = sub.add_parser("react", help="set a reaction on a message")
+    sp.add_argument("chat_id")
+    sp.add_argument("message_id", type=int)
+    sp.add_argument("emoji")
+
+    # ---- reply-cross-chat (CLI version of the fixed function) ----
+    sp = sub.add_parser("reply", help="reply to a message (possibly in another chat)")
+    sp.add_argument("src_chat_id")
+    sp.add_argument("src_message_id", type=int)
+    sp.add_argument("dst_chat_id")
+    sp.add_argument("text")
+    sp.add_argument("--parse-mode", default=None)
+
+    # ---- info ----
+    sub.add_parser("me", help="show bot info (getMe)")
+    sub.add_parser("profile", help="show current bot profile (name, bio, photo)")
+
+    args = parser.parse_args(argv)
+
+    # ---- dispatch ----
+    if args.cmd == "text":
+        data = {"chat_id": args.chat_id, "text": args.text}
+        if args.reply_to is not None:
+            data["reply_to_message_id"] = str(args.reply_to)
+        if args.parse_mode:
+            data["parse_mode"] = args.parse_mode
+        show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
+        return 0
+
+    if args.cmd in ("photo", "document", "video", "audio", "voice", "animation"):
+        method = {"photo": "sendPhoto", "document": "sendDocument",
+                  "video": "sendVideo", "audio": "sendAudio",
+                  "voice": "sendVoice", "animation": "sendAnimation"}[args.cmd]
+        field = args.cmd
+        caption = _read_caption_arg(args.caption, args.caption_file)
+        return _cli_send_file(bot, method, field, args.chat_id,
+                              args.path, caption,
+                              args.reply_to, args.parse_mode)
+
+    if args.cmd == "react":
+        reaction = json.dumps([{"type": "emoji", "emoji": args.emoji}])
+        show_send_result(bot.post("setMessageReaction", data={
+            "chat_id": args.chat_id,
+            "message_id": str(args.message_id),
+            "reaction": reaction,
+        }, ask_retry=False))
+        return 0
+
+    if args.cmd == "reply":
+        # reuse the same logic as the interactive function
+        if str(args.src_chat_id) == str(args.dst_chat_id):
+            data = {"chat_id": args.dst_chat_id, "text": args.text,
+                    "reply_to_message_id": str(args.src_message_id)}
+            if args.parse_mode:
+                data["parse_mode"] = args.parse_mode
+            show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
+            return 0
+        copy_resp = bot.post("copyMessage", data={
+            "chat_id": args.dst_chat_id,
+            "from_chat_id": args.src_chat_id,
+            "message_id": args.src_message_id,
+        }, ask_retry=False)
+        if not copy_resp or not copy_resp.get("ok"):
+            show_info_result(copy_resp)
+            return 1
+        new_id = copy_resp["result"]["message_id"]
+        data = {"chat_id": args.dst_chat_id, "text": args.text,
+                "reply_to_message_id": str(new_id)}
+        if args.parse_mode:
+            data["parse_mode"] = args.parse_mode
+        show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
+        return 0
+
+    if args.cmd == "me":
+        show_bot_info(bot)
+        return 0
+
+    if args.cmd == "profile":
+        get_bot_profile(bot)   # defined in section 3 below
+        return 0
+
+    return 1
+
+# ================================================================
 #  Entry point
 # ================================================================
 def print_banner() -> None:
@@ -3018,6 +3278,11 @@ def main():
     PROXY = proxy_url
 
     bot = TelegramBot(token, proxy_url)
+
+    # CLI mode: if any argument is given, run non-interactive command
+    if len(sys.argv) > 1:
+    # skip the connectivity prompt in CLI mode
+        sys.exit(run_cli(bot, sys.argv[1:]))
 
     # Quick connectivity test
     print(f"{Y}Connecting to Telegram API...{N}")

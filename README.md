@@ -1,8 +1,8 @@
 # termgram
 
-> A terminal client (TUI) for **Telegram bots** — send, manage, and monitor your bot directly from the command line.
+> A terminal client (TUI + CLI) for **Telegram bots** — send, manage, and monitor your bot directly from the command line.
 
-`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing.
+`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing. Since v1.1.0 it also ships with a **non-interactive CLI mode** for scripting and quick one-shot commands.
 
 ---
 
@@ -11,6 +11,11 @@
 ### 📨 Send every message type
 
 Text · Photo · Animation (GIF) · Video · Document · Audio · Voice · Video note · Sticker · Location · Contact · Poll · Dice · Reaction
+
+### 🖥 Two ways to drive it
+
+- **Interactive TUI** — numbered menu, prompt-driven, ideal for exploring the API by hand.
+- **CLI mode** — one-shot subcommands for scripting, cron jobs, or quick sends from the shell. Run `python3 termgram.py --help` to see every subcommand.
 
 ### 🔗 Inline URL buttons
 
@@ -47,6 +52,35 @@ Each line defines one reaction. The **first character is the emoji**, followed b
 
 > 💡 **Hot-reload:** `reactions.txt` is re-read automatically when its contents change — no restart needed. Delete the file and the built-in list is used again until you recreate it.
 
+### 🔀 Cross-chat reply
+
+Replying to a message that lives in **another chat** is supported natively. Since Telegram does **not** allow `reply_to_message_id` to cross chat boundaries, `termgram` handles this in two steps behind the scenes:
+
+1. `copyMessage` copies the source message into the target chat (creating a new message there).
+2. `sendMessage` replies to that newly created copy.
+
+The end result: the target chat sees a copy of the original message with your reply attached underneath it. If source and target chats are the **same**, the copy step is skipped and a plain reply is used.
+
+- **TUI:** menu option **40) Reply other chat**
+- **CLI:** `python3 termgram.py reply <src_chat> <src_msg_id> <dst_chat> "<text>"`
+
+### 🤖 Bot profile
+
+Read your bot's current identity and profile in one shot:
+
+- **`getMe`** — id, name, username, capabilities
+- **`getMyName`** — global display name (Bot API 9.0+)
+- **`getMyDescription`** — bio shown on the bot's profile page
+- **`getMyShortDescription`** — short blurb shown in shared chats
+- **`getUserProfilePhotos`** — the current profile photo set
+
+And of course you can *change* all of them:
+
+Set name · Set bio (description) · Set short bio · Set / remove profile photo
+
+- **TUI:** menu option **49) Get current profile**
+- **CLI:** `python3 termgram.py profile`
+
 ### 🛠 Message management
 
 Edit · Delete · Pin · Unpin · Forward · Chat actions (typing / uploading)
@@ -55,17 +89,13 @@ Edit · Delete · Pin · Unpin · Forward · Chat actions (typing / uploading)
 
 Leave chat · Get chat info · Member count · Member info · Ban · Unban · Promote / Demote admin · Set admin title · Set user tag · Set chat title / description · Create invite link
 
-### 🤖 Bot profile
-
-Set name · Set bio (description) · Set short bio · Set / remove profile photo · `getMe`
-
 ### 📁 Files
 
 Download any file by `file_id` · Upload a local file and get its `file_id`
 
 ### 📡 Monitor & automation
 
-Monitor mode (live updates) · Reply-to-other-chat
+Monitor mode (live updates) · Auto-reply · Auto-react · Reply-to-other-chat
 
 ### 💾 Local database (SQLite)
 
@@ -75,9 +105,9 @@ Silent fetch · Chat explorer · History viewer — every received message is st
 
 `socks5://` and `http://` — configured via `proxy.txt`
 
-### 🧭 Zero-config, menu-driven
+### 🧭 Zero-config TUI
 
-Everything is numbered. No CLI flags to memorize. Config files are auto-created on first run.
+Everything is numbered. No flags to memorize for interactive use. Config files are auto-created on first run.
 
 ### 🎨 Version banner
 
@@ -139,8 +169,6 @@ If the file is missing or empty, `termgram` connects directly.
 
 > 💡 On first run, `termgram` will auto-create `token.txt`, `proxy.txt`, `reactions.txt`, and `tg.db` if they don't exist.
 
----
-
 ### 3. Custom reactions (optional)
 
 You don't need to create `reactions.txt` manually — `termgram` writes it on first run, seeded with the full built-in Telegram reaction list.
@@ -163,6 +191,8 @@ To narrow it down, just edit `reactions.txt` (while the program is running is fi
 ---
 
 ## ▶️ Usage
+
+### Interactive TUI
 
 ```bash
 python3 termgram.py
@@ -190,7 +220,7 @@ Using proxy: socks5://127.0.0.1:10808
 
 Just pick a number and follow the prompts.
 
-### Example: sending a text message with buttons
+#### Example: sending a text message with buttons
 
 ```
 choice: 1
@@ -221,6 +251,97 @@ text: Hello from termgram!
 ✔ Sent successfully
 📨 message_id: 1234
 ```
+
+### CLI mode
+
+Any argument after the script name switches `termgram` into non-interactive mode. Every subcommand returns a shell exit code (`0` = success, non-zero = failure), so it composes well with scripts.
+
+```bash
+python3 termgram.py --help
+```
+
+```
+usage: termgram [-h] {text,photo,document,video,audio,voice,animation,react,reply,me,profile} ...
+
+Terminal client for Telegram bots — CLI mode
+
+positional arguments:
+  {text,photo,document,video,audio,voice,animation,react,reply,me,profile}
+    text                send a text message
+    photo               send a photo
+    document            send a document
+    video               send a video
+    audio               send an audio file
+    voice               send a voice message
+    animation           send an animation (GIF)
+    react               set a reaction on a message
+    reply               reply to a message (possibly in another chat)
+    me                  show bot info (getMe)
+    profile             show current bot profile (name, bio, photo)
+
+options:
+  -h, --help            show this help message and exit
+```
+
+Each subcommand also has its own `--help`:
+
+```bash
+python3 termgram.py photo --help
+python3 termgram.py reply --help
+```
+
+#### CLI examples
+
+```bash
+# Send a plain text message
+python3 termgram.py text -1001234567890 "Hello from the shell"
+
+# Send a text with Markdown formatting and a reply-to
+python3 termgram.py text @mychannel "**bold** reply" --parse-mode Markdown --reply-to 42
+
+# Send a photo with an inline caption
+python3 termgram.py photo -1001234567890 ./pic.jpg --caption "look at this"
+
+# Send a document, reading the caption from a text file
+python3 termgram.py document @mychannel ./archive.zip --caption-file cap.txt
+
+# Send a video with a caption and reply-to
+python3 termgram.py video -1001234567890 ./clip.mp4 --caption "🎬" --reply-to 900
+
+# React to a message
+python3 termgram.py react -1001234567890 99 👍
+
+# Cross-chat reply (copy + reply, handled automatically)
+python3 termgram.py reply @news 100 -1001234567890 "this is important"
+
+# Same-chat reply (no copy, direct reply)
+python3 termgram.py reply -1001234567890 55 -1001234567890 "thanks!"
+
+# Bot info
+python3 termgram.py me
+
+# Full current profile: name, description, short description, profile photo
+python3 termgram.py profile
+```
+
+##### Caption source for file subcommands
+
+`photo`, `document`, `video`, `audio`, `voice`, and `animation` all accept two mutually-exclusive options for the caption:
+
+| Option             | Meaning                                                  |
+| ------------------ | -------------------------------------------------------- |
+| `--caption TEXT`   | Inline caption string.                                   |
+| `--caption-file F` | Read the caption from file `F` (UTF-8, multi-line safe). |
+
+`--caption-file` takes precedence if both are given.
+
+##### Exit codes
+
+| Code | Meaning                          |
+| ---- | -------------------------------- |
+| `0`  | Success (Telegram returned `ok`) |
+| `1`  | Telegram returned an error       |
+| `2`  | Local usage / file error         |
 
 ---
 
@@ -256,3 +377,5 @@ Contributions are welcome from **invited collaborators**. If you'd like to help,
 ## 📜 License
 
 [MIT](LICENSE)
+
+---
