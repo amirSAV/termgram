@@ -111,13 +111,19 @@ Everything is numbered. No flags to memorize for interactive use. Config files a
 
 ### 🎨 Version banner
 
-On startup `termgram` prints a tidy banner with its name and version:
+On interactive startup `termgram` prints a tidy banner:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.0.0                              ║
+║  📡 termgram  v1.0.1                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
+```
+
+In **CLI mode** the banner is collapsed to a single short line, so it never pollutes shell output:
+
+```
+termgram v1.0.1
 ```
 
 ---
@@ -202,7 +208,7 @@ You'll see:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.0.0                              ║
+║  📡 termgram  v1.0.1                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 ✔ Created reactions.txt with 61 reactions
@@ -211,7 +217,7 @@ Using proxy: socks5://127.0.0.1:10808
 ✔ Bot connected: @YourBot (My Bot)
 
 =============== Telegram Bot Sender ===============
-          termgram v1.0.0
+          termgram v1.0.1
    1) Text message              2) Photo
    3) Animation (GIF)           4) Video
    ...
@@ -252,6 +258,8 @@ text: Hello from termgram!
 📨 message_id: 1234
 ```
 
+---
+
 ### CLI mode
 
 Any argument after the script name switches `termgram` into non-interactive mode. Every subcommand returns a shell exit code (`0` = success, non-zero = failure), so it composes well with scripts.
@@ -261,55 +269,115 @@ python3 termgram.py --help
 ```
 
 ```
-usage: termgram [-h] {text,photo,document,video,audio,voice,animation,react,reply,me,profile} ...
+usage: termgram [-h] <command> ...
 
-Terminal client for Telegram bots — CLI mode
+Terminal client for Telegram bots — CLI mode.
 
-positional arguments:
-  {text,photo,document,video,audio,voice,animation,react,reply,me,profile}
-    text                send a text message
-    photo               send a photo
-    document            send a document
-    video               send a video
-    audio               send an audio file
-    voice               send a voice message
-    animation           send an animation (GIF)
-    react               set a reaction on a message
-    reply               reply to a message (possibly in another chat)
-    me                  show bot info (getMe)
-    profile             show current bot profile (name, bio, photo)
+Send messages:
+  text        send a text message
+  photo       send a photo
+  document    send a document
+  video       send a video
+  audio       send an audio
+  voice       send a voice message
+  animation   send a GIF / animation
+  video_note  send a round video note
+  sticker     send a sticker
+  location    send a location
+  contact     send a contact
+  dice        send a dice
 
-options:
-  -h, --help            show this help message and exit
+Message management:
+  react       set a reaction on a message
+  edit        edit a message's text
+  delete      delete a message
+  pin         pin a message
+  unpin       unpin a message
+  forward     forward a message
+  reply       reply to a message (works across chats)
+  chat-action send a chat action (typing, upload_photo, ...)
+
+Chat & members:
+  leave         leave a chat/channel
+  chat-info     get chat info
+  member-count  get member count
+  member-info   get a chat member
+  ban           ban a user
+  unban         unban a user
+  promote       promote a user to admin (all perms)
+  demote        remove admin rights
+  set-title     set chat title
+  set-description  set chat description
+  invite-link   create a chat invite link
+
+Bot profile:
+  me            getMe
+  profile       full profile (name, bio, photo)
+  set-name      set global name
+  set-bio       set description / bio
+  set-short-bio set short description
+  remove-photo  remove profile photo
+
+Files:
+  download    download a file by file_id
+  upload      upload a file and print its file_id
+
+Examples:
+  termgram text 123456 "Hello"
+  termgram text 123456 --text-file msg.txt --parse-mode Markdown
+  termgram photo 123456 pic.jpg --caption "look"
+  termgram document @mychan file.pdf --caption-file cap.txt
+  termgram react 123456 42 👍
+  termgram ban 123456 987654321 --revoke
+  termgram download AgACAgQAAxkBAA... --out file.bin
+  termgram upload 123456 ./img.png --as photo
 ```
 
 Each subcommand also has its own `--help`:
 
 ```bash
 python3 termgram.py photo --help
+python3 termgram.py ban --help
 python3 termgram.py reply --help
 ```
 
 #### CLI examples
 
 ```bash
-# Send a plain text message
+# ── sending ────────────────────────────────────────────────
+# Plain text
 python3 termgram.py text -1001234567890 "Hello from the shell"
 
-# Send a text with Markdown formatting and a reply-to
-python3 termgram.py text @mychannel "**bold** reply" --parse-mode Markdown --reply-to 42
+# Text with Markdown + reply-to
+python3 termgram.py text @mychannel "**bold** reply" \
+    --parse-mode Markdown --reply-to 42
 
-# Send a photo with an inline caption
+# Text read from a file (multi-line safe)
+python3 termgram.py text -1001234567890 --text-file msg.txt
+
+# Photo with inline caption
 python3 termgram.py photo -1001234567890 ./pic.jpg --caption "look at this"
 
-# Send a document, reading the caption from a text file
+# Document, reading caption from a file
 python3 termgram.py document @mychannel ./archive.zip --caption-file cap.txt
 
-# Send a video with a caption and reply-to
-python3 termgram.py video -1001234567890 ./clip.mp4 --caption "🎬" --reply-to 900
+# Video with caption + reply-to
+python3 termgram.py video -1001234567890 ./clip.mp4 \
+    --caption "🎬" --reply-to 900
 
-# React to a message
-python3 termgram.py react -1001234567890 99 👍
+# Location, contact, dice
+python3 termgram.py location -1001234567890 35.6892 51.3890
+python3 termgram.py contact  -1001234567890 "+15551234567" "John" --last-name "Doe"
+python3 termgram.py dice     -1001234567890 🎲
+
+# ── message management ────────────────────────────────────
+python3 termgram.py react  -1001234567890 99 👍
+python3 termgram.py edit   -1001234567890 99 "updated text"
+python3 termgram.py delete -1001234567890 99
+python3 termgram.py pin    -1001234567890 99
+python3 termgram.py unpin  -1001234567890            # unpin all
+python3 termgram.py forward @src 42 @dst
+python3 termgram.py chat-action @mychannel typing
 
 # Cross-chat reply (copy + reply, handled automatically)
 python3 termgram.py reply @news 100 -1001234567890 "this is important"
@@ -317,16 +385,46 @@ python3 termgram.py reply @news 100 -1001234567890 "this is important"
 # Same-chat reply (no copy, direct reply)
 python3 termgram.py reply -1001234567890 55 -1001234567890 "thanks!"
 
-# Bot info
-python3 termgram.py me
+# ── chat / members ────────────────────────────────────────
+python3 termgram.py chat-info    @mychannel
+python3 termgram.py member-count @mychannel
+python3 termgram.py member-info  @mychannel 123456789
+python3 termgram.py ban    @mychannel 987654321 --revoke
+python3 termgram.py unban  @mychannel 987654321
+python3 termgram.py promote @mychannel 987654321
+python3 termgram.py demote  @mychannel 987654321
+python3 termgram.py set-title @mychannel "New Title"
+python3 termgram.py set-description @mychannel "Welcome!"
+python3 termgram.py invite-link @mychannel --name "July" --limit 100
+python3 termgram.py leave @mychannel
 
-# Full current profile: name, description, short description, profile photo
+# ── bot profile ───────────────────────────────────────────
+python3 termgram.py me
 python3 termgram.py profile
+python3 termgram.py set-name "My Cool Bot"
+python3 termgram.py set-bio "I help you do X." --lang en
+python3 termgram.py set-bio --bio-file bio.txt
+python3 termgram.py set-short-bio "Fast & simple."
+python3 termgram.py remove-photo
+
+# ── files ─────────────────────────────────────────────────
+python3 termgram.py download AgACAgQAAxkBAA... --out pic.jpg
+python3 termgram.py upload -1001234567890 ./img.png --as photo
 ```
 
-##### Caption source for file subcommands
+##### Text & caption sources
 
-`photo`, `document`, `video`, `audio`, `voice`, and `animation` all accept two mutually-exclusive options for the caption:
+Several subcommands accept text either **inline** or **from a file**:
+
+| Subcommand  | Inline form            | File form          |
+| ----------- | ---------------------- | ------------------ |
+| `text`      | positional `text`      | `--text-file F`    |
+| `edit`      | positional `text`      | `--text-file F`    |
+| `reply`     | positional `text`      | `--text-file F`    |
+| `set-bio`   | positional `description` | `--bio-file F`   |
+| `set-short-bio` | positional `description` | `--bio-file F` |
+
+File-based subcommands (photo, document, video, audio, voice, animation) accept two mutually-exclusive options for the caption:
 
 | Option             | Meaning                                                  |
 | ------------------ | -------------------------------------------------------- |
@@ -337,11 +435,21 @@ python3 termgram.py profile
 
 ##### Exit codes
 
-| Code | Meaning                          |
-| ---- | -------------------------------- |
-| `0`  | Success (Telegram returned `ok`) |
-| `1`  | Telegram returned an error       |
-| `2`  | Local usage / file error         |
+| Code | Meaning                                    |
+| ---- | ------------------------------------------ |
+| `0`  | Success (Telegram returned `ok`)           |
+| `1`  | Telegram returned an error                 |
+| `2`  | Local usage / file error (missing file, …) |
+
+##### CLI banner
+
+In CLI mode the banner is intentionally tiny so it can be piped safely:
+
+```
+termgram v1.0.1
+```
+
+No connectivity prompt, no "press any key" — a single-shot command runs, prints its result, and exits.
 
 ---
 
@@ -377,5 +485,3 @@ Contributions are welcome from **invited collaborators**. If you'd like to help,
 ## 📜 License
 
 [MIT](LICENSE)
-
----

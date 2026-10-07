@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
@@ -3126,98 +3126,375 @@ def _cli_send_file(bot: TelegramBot, method: str, field: str,
     return 0 if (resp and resp.get("ok")) else 1
 
 
+def _read_text_arg(inline: Optional[str],
+                   file_path: Optional[str]) -> Optional[str]:
+    """Return text from inline arg or file. None if neither given."""
+    if file_path:
+        if not os.path.isfile(file_path):
+            print(f"{R}text file not found: {file_path}{N}", file=sys.stderr)
+            return None
+        with open(file_path, encoding="utf-8") as f:
+            return f.read()
+    return inline
+
+def _send_ok(resp) -> int:
+    show_send_result(resp)
+    return 0 if (resp and resp.get("ok")) else 1
+
 def run_cli(bot: TelegramBot, argv: List[str]) -> int:
     """Parse argv and execute a one-shot command. Return exit code."""
+
     parser = argparse.ArgumentParser(
         prog=APP_NAME,
-        description=f"{APP_TAGLINE} — CLI mode",
-    )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+        description=f"{APP_TAGLINE} — CLI mode.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Send messages:
+  text        send a text message
+  photo       send a photo
+  document    send a document
+  video       send a video
+  audio       send an audio
+  voice       send a voice message
+  animation   send a GIF / animation
+  video_note  send a round video note
+  sticker     send a sticker
+  location    send a location
+  contact     send a contact
+  dice        send a dice
 
-    # ---- text ----
+Message management:
+  react       set a reaction on a message
+  edit        edit a message's text
+  delete      delete a message
+  pin         pin a message
+  unpin       unpin a message
+  forward     forward a message
+  reply       reply to a message (works across chats)
+  chat-action send a chat action (typing, upload_photo, ...)
+
+Chat & members:
+  leave         leave a chat/channel
+  chat-info     get chat info
+  member-count  get member count
+  member-info   get a chat member
+  ban           ban a user
+  unban         unban a user
+  promote       promote a user to admin (all perms)
+  demote        remove admin rights
+  set-title     set chat title
+  set-description  set chat description
+  invite-link   create a chat invite link
+
+Bot profile:
+  me            getMe
+  profile       full profile (name, bio, photo)
+  set-name      set global name
+  set-bio       set description / bio
+  set-short-bio set short description
+  remove-photo  remove profile photo
+
+Files:
+  download    download a file by file_id
+  upload      upload a file and print its file_id
+
+Examples:
+  termgram text 123456 "Hello"
+  termgram text 123456 --text-file msg.txt --parse-mode Markdown
+  termgram photo 123456 pic.jpg --caption "look"
+  termgram document @mychan file.pdf --caption-file cap.txt
+  termgram react 123456 42 👍
+  termgram ban 123456 987654321 --revoke
+  termgram download AgACAgQAAxkBAA... --out file.bin
+  termgram upload 123456 ./img.png --as photo
+""",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    # ============ SEND ============
     p = sub.add_parser("text", help="send a text message")
     p.add_argument("chat_id")
-    p.add_argument("text")
+    p.add_argument("text", nargs="?", default=None,
+                   help="message text (or use --text-file)")
+    p.add_argument("--text-file", default=None, help="read text from file")
     p.add_argument("--reply-to", type=int, default=None)
     p.add_argument("--parse-mode", default=None)
 
-    # ---- photo / document / video / audio / voice / animation ----
-    for name, method, field in (
-        ("photo",     "sendPhoto",     "photo"),
-        ("document",  "sendDocument",  "document"),
-        ("video",     "sendVideo",     "video"),
-        ("audio",     "sendAudio",     "audio"),
-        ("voice",     "sendVoice",     "voice"),
-        ("animation", "sendAnimation", "animation"),
-    ):
+    for name in ("photo", "document", "video", "audio",
+                 "voice", "animation", "video_note", "sticker"):
         sp = sub.add_parser(name, help=f"send a {name}")
         sp.add_argument("chat_id")
         sp.add_argument("path", help="local file path, URL, or file_id")
-        sp.add_argument("--caption", default=None,
-                        help="caption text (inline)")
-        sp.add_argument("--caption-file", default=None,
-                        help="read caption from this .txt file")
+        sp.add_argument("--caption", default=None)
+        sp.add_argument("--caption-file", default=None)
         sp.add_argument("--reply-to", type=int, default=None)
         sp.add_argument("--parse-mode", default=None)
 
-    # ---- react ----
+    sp = sub.add_parser("location", help="send a location")
+    sp.add_argument("chat_id")
+    sp.add_argument("latitude", type=float)
+    sp.add_argument("longitude", type=float)
+
+    sp = sub.add_parser("contact", help="send a contact")
+    sp.add_argument("chat_id")
+    sp.add_argument("phone_number")
+    sp.add_argument("first_name")
+    sp.add_argument("--last-name", default=None)
+
+    sp = sub.add_parser("dice", help="send a dice")
+    sp.add_argument("chat_id")
+    sp.add_argument("emoji", nargs="?", default="🎲")
+
+    # ============ MESSAGE MANAGEMENT ============
     sp = sub.add_parser("react", help="set a reaction on a message")
     sp.add_argument("chat_id")
     sp.add_argument("message_id", type=int)
     sp.add_argument("emoji")
 
-    # ---- reply-cross-chat (CLI version of the fixed function) ----
-    sp = sub.add_parser("reply", help="reply to a message (possibly in another chat)")
+    sp = sub.add_parser("edit", help="edit a message's text")
+    sp.add_argument("chat_id")
+    sp.add_argument("message_id", type=int)
+    sp.add_argument("text", nargs="?", default=None)
+    sp.add_argument("--text-file", default=None)
+    sp.add_argument("--parse-mode", default=None)
+
+    sp = sub.add_parser("delete", help="delete a message")
+    sp.add_argument("chat_id")
+    sp.add_argument("message_id", type=int)
+
+    sp = sub.add_parser("pin", help="pin a message")
+    sp.add_argument("chat_id")
+    sp.add_argument("message_id", type=int)
+    sp.add_argument("--silent", action="store_true")
+
+    sp = sub.add_parser("unpin", help="unpin a message (no id = unpin all)")
+    sp.add_argument("chat_id")
+    sp.add_argument("message_id", type=int, nargs="?", default=None)
+
+    sp = sub.add_parser("forward", help="forward a message")
+    sp.add_argument("from_chat_id")
+    sp.add_argument("to_chat_id")
+    sp.add_argument("message_id", type=int)
+    sp.add_argument("--silent", action="store_true")
+
+    sp = sub.add_parser("reply", help="reply to a message (works across chats)")
     sp.add_argument("src_chat_id")
     sp.add_argument("src_message_id", type=int)
     sp.add_argument("dst_chat_id")
-    sp.add_argument("text")
+    sp.add_argument("text", nargs="?", default=None)
+    sp.add_argument("--text-file", default=None)
     sp.add_argument("--parse-mode", default=None)
 
-    # ---- info ----
+    sp = sub.add_parser("chat-action", help="send a chat action")
+    sp.add_argument("chat_id")
+    sp.add_argument("action", nargs="?", default="typing")
+
+    # ============ CHAT / MEMBERS ============
+    sp = sub.add_parser("leave", help="leave a chat/channel")
+    sp.add_argument("chat_id")
+
+    sp = sub.add_parser("chat-info", help="get chat info")
+    sp.add_argument("chat_id")
+
+    sp = sub.add_parser("member-count", help="get member count")
+    sp.add_argument("chat_id")
+
+    sp = sub.add_parser("member-info", help="get a chat member")
+    sp.add_argument("chat_id")
+    sp.add_argument("user_id")
+
+    sp = sub.add_parser("ban", help="ban a user")
+    sp.add_argument("chat_id")
+    sp.add_argument("user_id")
+    sp.add_argument("--revoke", action="store_true", help="revoke messages")
+    sp.add_argument("--until", type=int, default=None, help="unix ts (0=forever)")
+
+    sp = sub.add_parser("unban", help="unban a user")
+    sp.add_argument("chat_id")
+    sp.add_argument("user_id")
+    sp.add_argument("--only-if-banned", action="store_true")
+
+    sp = sub.add_parser("promote", help="promote a user to admin (all perms)")
+    sp.add_argument("chat_id")
+    sp.add_argument("user_id")
+
+    sp = sub.add_parser("demote", help="remove admin rights")
+    sp.add_argument("chat_id")
+    sp.add_argument("user_id")
+
+    sp = sub.add_parser("set-title", help="set chat title")
+    sp.add_argument("chat_id")
+    sp.add_argument("title")
+
+    sp = sub.add_parser("set-description", help="set chat description")
+    sp.add_argument("chat_id")
+    sp.add_argument("description", nargs="?", default="")
+
+    sp = sub.add_parser("invite-link", help="create a chat invite link")
+    sp.add_argument("chat_id")
+    sp.add_argument("--name", default=None)
+    sp.add_argument("--limit", type=int, default=None)
+    sp.add_argument("--expire", type=int, default=None)
+
+    # ============ BOT PROFILE ============
     sub.add_parser("me", help="show bot info (getMe)")
-    sub.add_parser("profile", help="show current bot profile (name, bio, photo)")
+    sub.add_parser("profile", help="show full bot profile")
+
+    sp = sub.add_parser("set-name", help="set bot global name")
+    sp.add_argument("name")
+    sp.add_argument("--lang", default=None)
+
+    sp = sub.add_parser("set-bio", help="set bot description / bio")
+    sp.add_argument("description", nargs="?", default=None)
+    sp.add_argument("--bio-file", default=None)
+    sp.add_argument("--lang", default=None)
+
+    sp = sub.add_parser("set-short-bio", help="set bot short description")
+    sp.add_argument("description", nargs="?", default=None)
+    sp.add_argument("--bio-file", default=None)
+    sp.add_argument("--lang", default=None)
+
+    sub.add_parser("remove-photo", help="remove bot profile photo")
+
+    # ============ FILES ============
+    sp = sub.add_parser("download", help="download a file by file_id")
+    sp.add_argument("file_id")
+    sp.add_argument("--out", default=None, help="output path")
+
+    sp = sub.add_parser("upload", help="upload a file and print its file_id")
+    sp.add_argument("chat_id")
+    sp.add_argument("path")
+    sp.add_argument("--as", dest="as_type", default="document",
+                    choices=["document", "photo", "video", "audio",
+                             "voice", "animation", "sticker"])
 
     args = parser.parse_args(argv)
 
-    # ---- dispatch ----
+    # ================================================================
+    #  DISPATCH
+    # ================================================================
+
+    # ---------- text ----------
     if args.cmd == "text":
-        data = {"chat_id": args.chat_id, "text": args.text}
+        text = _read_text_arg(args.text, args.text_file)
+        if not text:
+            print(f"{R}text is required (positional or --text-file){N}",
+                  file=sys.stderr)
+            return 2
+        data = {"chat_id": args.chat_id, "text": text}
         if args.reply_to is not None:
             data["reply_to_message_id"] = str(args.reply_to)
         if args.parse_mode:
             data["parse_mode"] = args.parse_mode
-        show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
-        return 0
+        return _send_ok(bot.post("sendMessage", data=data, ask_retry=False))
 
-    if args.cmd in ("photo", "document", "video", "audio", "voice", "animation"):
-        method = {"photo": "sendPhoto", "document": "sendDocument",
-                  "video": "sendVideo", "audio": "sendAudio",
-                  "voice": "sendVoice", "animation": "sendAnimation"}[args.cmd]
-        field = args.cmd
-        caption = _read_caption_arg(args.caption, args.caption_file)
-        return _cli_send_file(bot, method, field, args.chat_id,
-                              args.path, caption,
-                              args.reply_to, args.parse_mode)
+    # ---------- file senders ----------
+    file_cmds = {
+        "photo":     ("sendPhoto",     "photo"),
+        "document":  ("sendDocument",  "document"),
+        "video":     ("sendVideo",     "video"),
+        "audio":     ("sendAudio",     "audio"),
+        "voice":     ("sendVoice",     "voice"),
+        "animation": ("sendAnimation", "animation"),
+        "video_note":("sendVideoNote", "video_note"),
+        "sticker":   ("sendSticker",   "sticker"),
+    }
+    if args.cmd in file_cmds:
+        method, field = file_cmds[args.cmd]
+        caption = ""
+        if getattr(args, "caption_file", None) or getattr(args, "caption", None):
+            caption = _read_caption_arg(args.caption, args.caption_file)
+        return _cli_send_file(
+            bot, method, field, args.chat_id, args.path, caption,
+            getattr(args, "reply_to", None),
+            getattr(args, "parse_mode", None),
+        )
 
+    # ---------- location / contact / dice ----------
+    if args.cmd == "location":
+        return _send_ok(bot.post("sendLocation", data={
+            "chat_id": args.chat_id,
+            "latitude": str(args.latitude),
+            "longitude": str(args.longitude),
+        }, ask_retry=False))
+
+    if args.cmd == "contact":
+        data = {"chat_id": args.chat_id,
+                "phone_number": args.phone_number,
+                "first_name": args.first_name}
+        if args.last_name:
+            data["last_name"] = args.last_name
+        return _send_ok(bot.post("sendContact", data=data, ask_retry=False))
+
+    if args.cmd == "dice":
+        return _send_ok(bot.post("sendDice", data={
+            "chat_id": args.chat_id, "emoji": args.emoji,
+        }, ask_retry=False))
+
+    # ---------- react ----------
     if args.cmd == "react":
         reaction = json.dumps([{"type": "emoji", "emoji": args.emoji}])
-        show_send_result(bot.post("setMessageReaction", data={
+        return _send_ok(bot.post("setMessageReaction", data={
             "chat_id": args.chat_id,
             "message_id": str(args.message_id),
             "reaction": reaction,
         }, ask_retry=False))
-        return 0
 
+    # ---------- edit ----------
+    if args.cmd == "edit":
+        text = _read_text_arg(args.text, args.text_file)
+        if not text:
+            print(f"{R}text is required{N}", file=sys.stderr)
+            return 2
+        data = {"chat_id": args.chat_id,
+                "message_id": str(args.message_id),
+                "text": text}
+        if args.parse_mode:
+            data["parse_mode"] = args.parse_mode
+        return _send_ok(bot.post("editMessageText", data=data, ask_retry=False))
+
+    # ---------- delete ----------
+    if args.cmd == "delete":
+        return _send_ok(bot.post("deleteMessage", data={
+            "chat_id": args.chat_id,
+            "message_id": str(args.message_id),
+        }, ask_retry=False))
+
+    # ---------- pin / unpin ----------
+    if args.cmd == "pin":
+        data = {"chat_id": args.chat_id,
+                "message_id": str(args.message_id)}
+        if args.silent:
+            data["disable_notification"] = "true"
+        return _send_ok(bot.post("pinChatMessage", data=data, ask_retry=False))
+
+    if args.cmd == "unpin":
+        data = {"chat_id": args.chat_id}
+        if args.message_id is not None:
+            data["message_id"] = str(args.message_id)
+        return _send_ok(bot.post("unpinChatMessage", data=data, ask_retry=False))
+
+    # ---------- forward ----------
+    if args.cmd == "forward":
+        data = {"chat_id": args.to_chat_id,
+                "from_chat_id": args.from_chat_id,
+                "message_id": str(args.message_id)}
+        if args.silent:
+            data["disable_notification"] = "true"
+        return _send_ok(bot.post("forwardMessage", data=data, ask_retry=False))
+
+    # ---------- reply (cross-chat) ----------
     if args.cmd == "reply":
-        # reuse the same logic as the interactive function
+        text = _read_text_arg(args.text, args.text_file)
+        if not text:
+            print(f"{R}text is required{N}", file=sys.stderr)
+            return 2
         if str(args.src_chat_id) == str(args.dst_chat_id):
-            data = {"chat_id": args.dst_chat_id, "text": args.text,
+            data = {"chat_id": args.dst_chat_id, "text": text,
                     "reply_to_message_id": str(args.src_message_id)}
             if args.parse_mode:
                 data["parse_mode"] = args.parse_mode
-            show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
-            return 0
+            return _send_ok(bot.post("sendMessage", data=data, ask_retry=False))
         copy_resp = bot.post("copyMessage", data={
             "chat_id": args.dst_chat_id,
             "from_chat_id": args.src_chat_id,
@@ -3227,20 +3504,203 @@ def run_cli(bot: TelegramBot, argv: List[str]) -> int:
             show_info_result(copy_resp)
             return 1
         new_id = copy_resp["result"]["message_id"]
-        data = {"chat_id": args.dst_chat_id, "text": args.text,
+        data = {"chat_id": args.dst_chat_id, "text": text,
                 "reply_to_message_id": str(new_id)}
         if args.parse_mode:
             data["parse_mode"] = args.parse_mode
-        show_send_result(bot.post("sendMessage", data=data, ask_retry=False))
+        return _send_ok(bot.post("sendMessage", data=data, ask_retry=False))
+
+    # ---------- chat action ----------
+    if args.cmd == "chat-action":
+        return _send_ok(bot.post("sendChatAction", data={
+            "chat_id": args.chat_id, "action": args.action,
+        }, ask_retry=False))
+
+    # ---------- leave / chat-info / member-count ----------
+    if args.cmd == "leave":
+        return _send_ok(bot.post("leaveChat", data={"chat_id": args.chat_id},
+                                 ask_retry=False))
+
+    if args.cmd == "chat-info":
+        show_info_result(bot.post("getChat", data={"chat_id": args.chat_id},
+                                  ask_retry=False))
         return 0
 
+    if args.cmd == "member-count":
+        show_info_result(bot.post("getChatMemberCount",
+                                  data={"chat_id": args.chat_id},
+                                  ask_retry=False))
+        return 0
+
+    if args.cmd == "member-info":
+        show_info_result(bot.post("getChatMember", data={
+            "chat_id": args.chat_id, "user_id": args.user_id,
+        }, ask_retry=False))
+        return 0
+
+    # ---------- ban / unban ----------
+    if args.cmd == "ban":
+        data = {"chat_id": args.chat_id, "user_id": args.user_id}
+        if args.revoke:
+            data["revoke_messages"] = "true"
+        if args.until is not None:
+            data["until_date"] = str(args.until)
+        return _send_ok(bot.post("banChatMember", data=data, ask_retry=False))
+
+    if args.cmd == "unban":
+        data = {"chat_id": args.chat_id, "user_id": args.user_id}
+        if args.only_if_banned:
+            data["only_if_banned"] = "true"
+        return _send_ok(bot.post("unbanChatMember", data=data, ask_retry=False))
+
+    # ---------- promote / demote ----------
+    if args.cmd == "promote":
+        data = {
+            "chat_id": args.chat_id, "user_id": args.user_id,
+            "can_change_info": True, "can_post_messages": True,
+            "can_edit_messages": True, "can_delete_messages": True,
+            "can_invite_users": True, "can_restrict_members": True,
+            "can_pin_messages": True, "can_promote_members": True,
+            "can_manage_video_chats": True, "can_manage_chat": True,
+            "can_manage_topics": True,
+        }
+        return _send_ok(bot.post("promoteChatMember", data=data, ask_retry=False))
+
+    if args.cmd == "demote":
+        data = {
+            "chat_id": args.chat_id, "user_id": args.user_id,
+            "can_change_info": False, "can_post_messages": False,
+            "can_edit_messages": False, "can_delete_messages": False,
+            "can_invite_users": False, "can_restrict_members": False,
+            "can_pin_messages": False, "can_promote_members": False,
+            "can_manage_video_chats": False, "can_manage_chat": False,
+            "can_manage_topics": False,
+        }
+        return _send_ok(bot.post("promoteChatMember", data=data, ask_retry=False))
+
+    # ---------- set title / description ----------
+    if args.cmd == "set-title":
+        return _send_ok(bot.post("setChatTitle", data={
+            "chat_id": args.chat_id, "title": args.title,
+        }, ask_retry=False))
+
+    if args.cmd == "set-description":
+        data = {"chat_id": args.chat_id}
+        if args.description:
+            data["description"] = args.description
+        return _send_ok(bot.post("setChatDescription", data=data, ask_retry=False))
+
+    # ---------- invite link ----------
+    if args.cmd == "invite-link":
+        data = {"chat_id": args.chat_id}
+        if args.name:
+            data["name"] = args.name
+        if args.limit is not None:
+            data["member_limit"] = str(args.limit)
+        if args.expire is not None:
+            data["expire_date"] = str(args.expire)
+        resp = bot.post("createChatInviteLink", data=data, ask_retry=False)
+        if resp and resp.get("ok"):
+            link = resp["result"].get("invite_link", "")
+            if link:
+                print(link)
+            return 0
+        show_info_result(resp)
+        return 1
+
+    # ---------- bot identity / profile ----------
     if args.cmd == "me":
         show_bot_info(bot)
         return 0
 
     if args.cmd == "profile":
-        get_bot_profile(bot)   # defined in section 3 below
+        get_bot_profile(bot)
         return 0
+
+    if args.cmd == "set-name":
+        data = {"name": args.name}
+        if args.lang:
+            data["language_code"] = args.lang
+        return _send_ok(bot.post("setMyName", data=data, ask_retry=False))
+
+    if args.cmd == "set-bio":
+        desc = _read_text_arg(args.description, args.bio_file) or ""
+        data = {"description": desc}
+        if args.lang:
+            data["language_code"] = args.lang
+        return _send_ok(bot.post("setMyDescription", data=data, ask_retry=False))
+
+    if args.cmd == "set-short-bio":
+        desc = _read_text_arg(args.description, args.bio_file) or ""
+        data = {"short_description": desc}
+        if args.lang:
+            data["language_code"] = args.lang
+        return _send_ok(bot.post("setMyShortDescription", data=data,
+                                 ask_retry=False))
+
+    if args.cmd == "remove-photo":
+        return _send_ok(bot.post("removeMyProfilePhoto", ask_retry=False))
+
+    # ---------- download by file_id ----------
+    if args.cmd == "download":
+        resp = bot.post("getFile", data={"file_id": args.file_id},
+                        ask_retry=False)
+        if not resp or not resp.get("ok"):
+            show_info_result(resp)
+            return 1
+        file_path = resp["result"].get("file_path")
+        if not file_path:
+            print(f"{R}could not resolve file_path{N}", file=sys.stderr)
+            return 1
+        out = args.out or os.path.basename(file_path)
+        url = f"{bot.file_api}/{file_path}"
+        try:
+            r = bot.session.get(url, timeout=60)
+            with open(out, "wb") as f:
+                f.write(r.content)
+            print(f"{G}✔ Saved: {out} "
+                  f"({os.path.getsize(out) / 1024:.1f} KB){N}")
+            return 0
+        except Exception as e:
+            print(f"{R}download failed: {e}{N}", file=sys.stderr)
+            return 1
+
+    # ---------- upload & get file_id ----------
+    if args.cmd == "upload":
+        if not os.path.isfile(args.path):
+            print(f"{R}file not found: {args.path}{N}", file=sys.stderr)
+            return 2
+        method_field = {
+            "document":  ("sendDocument",  "document"),
+            "photo":     ("sendPhoto",     "photo"),
+            "video":     ("sendVideo",     "video"),
+            "audio":     ("sendAudio",     "audio"),
+            "voice":     ("sendVoice",     "voice"),
+            "animation": ("sendAnimation", "animation"),
+            "sticker":   ("sendSticker",   "sticker"),
+        }[args.as_type]
+        method, field = method_field
+        files = {field: (os.path.basename(args.path),
+                         open(args.path, "rb"),
+                         guess_mime(args.path))}
+        resp = bot.post(method, data={"chat_id": args.chat_id},
+                        files=files, ask_retry=False)
+        if not resp or not resp.get("ok"):
+            show_info_result(resp)
+            return 1
+        result = resp["result"]
+        for key in ("document", "video", "audio", "voice",
+                    "animation", "sticker"):
+            obj = result.get(key)
+            if obj and "file_id" in obj:
+                print(obj["file_id"])
+                return 0
+        photos = result.get("photo")
+        if photos:
+            print(photos[-1].get("file_id", ""))
+            return 0
+        print(f"{Y}file_id not found in response{N}", file=sys.stderr)
+        return 1
 
     return 1
 
@@ -3258,8 +3718,15 @@ def print_banner() -> None:
 def main():
     global PROXY
 
-    print_banner()
+    cli_mode = len(sys.argv) > 1
 
+    # --- banner ---
+    if cli_mode:
+        print(f"{B}{APP_NAME}{N} {Y}v{APP_VERSION}{N}")
+    else:
+        print_banner()
+
+    # --- token ---
     if not os.path.isfile(TOKEN_FILE):
         print(f"ERROR: token file not found: {TOKEN_FILE}", file=sys.stderr)
         sys.exit(1)
@@ -3279,19 +3746,19 @@ def main():
 
     bot = TelegramBot(token, proxy_url)
 
-    # CLI mode: if any argument is given, run non-interactive command
-    if len(sys.argv) > 1:
-    # skip the connectivity prompt in CLI mode
+    # --- CLI mode: no connectivity prompt, just run ---
+    if cli_mode:
         sys.exit(run_cli(bot, sys.argv[1:]))
 
-    # Quick connectivity test
+    # --- interactive mode: full banner already printed, do connectivity test ---
     print(f"{Y}Connecting to Telegram API...{N}")
     if proxy_url:
         print(f"{Y}Using proxy: {proxy_url}{N}")
     resp = bot.post("getMe")
     if resp and resp.get("ok"):
         bot_info = resp["result"]
-        print(f"{G}✔ Bot connected: @{bot_info.get('username', '?')} ({bot_info.get('first_name', '?')}){N}")
+        print(f"{G}✔ Bot connected: @{bot_info.get('username', '?')} "
+              f"({bot_info.get('first_name', '?')}){N}")
         bot.bot_id = bot_info["id"]
     else:
         print(f"{R}✘ Could not connect to Telegram API{N}")
