@@ -34,23 +34,33 @@ Row 3 — number of buttons:            ← empty = finish
 
 ### 💬 Custom reactions
 
-`termgram` ships with a **built-in list of 61 Telegram reactions** (👍 ❤️ 🔥 …). On first run it auto-creates a `reactions.txt` file seeded with that list. Edit the file to keep only the reactions you care about — for example the ones your bot has unlocked, or a curated shortlist.
+`termgram` ships with a **built-in list of 61 Telegram reactions** (👍 ❤️ 🔥 …) stored in `config.json`. You can manage reactions interactively via **menu option 51) Manage reactions** (list, add, remove, or reset to standard Telegram reactions), or edit `config.json` directly.
 
-Each line defines one reaction. The **first character is the emoji**, followed by a **space**, and then the **name/description** you want shown in the menu:
+Reactions are structured as clean JSON entries:
 
+```json
+{
+  "emoji": "👍",
+  "label": "Thumbs Up"
+}
 ```
-👍 Like
-❤️ Love
-🔥 Fire
-🎉 Party
-😢 Sad
-```
 
-- The first character (emoji) is what gets sent to Telegram.
-- Everything after the first space is just a label shown in the numbered menu.
-- Lines starting with `#` are treated as comments and ignored.
+- The `emoji` field is sent to Telegram.
+- The `label` is the display description shown in the picker.
+- Changes saved in `config.json` reload dynamically without restarting `termgram`.
 
-> 💡 **Hot-reload:** `reactions.txt` is re-read automatically when its contents change — no restart needed. Delete the file and the built-in list is used again until you recreate it.
+### 🔑 Bot token management & server verification
+
+Manage your bot token at any time using **menu option 50) Manage bot token**:
+- View the masked or full token.
+- Update the token with instant Telegram API verification (`getMe`).
+- Test connectivity and identity without leaving the client.
+
+On startup, `termgram` validates your token directly with Telegram's servers. If the token is invalid or missing, it alerts you immediately (confirming Telegram API's `401 Unauthorized` response) and prompts for a valid token or allows a clean exit.
+
+### 🛡 Zero-crash bootstrapping
+
+Even if `termgram.py` is executed standalone in an empty directory, it automatically creates `config.json` and initializes `tg.db` SQLite schema without crashing or raising missing-file errors.
 
 ### 🔀 Cross-chat reply
 
@@ -103,11 +113,11 @@ Silent fetch · Chat explorer · History viewer — every received message is st
 
 ### 🌐 Proxy support
 
-`socks5://` and `http://` — configured via `proxy.txt`
+`socks5://` and `http://` — configured via `config.json` or interactively in **menu option 17) Configure proxy**.
 
-### 🧭 Zero-config TUI
+### 🧭 Zero-config TUI & smooth menu cascade
 
-Everything is numbered. No flags to memorize for interactive use. Config files are auto-created on first run.
+Everything is numbered. No flags to memorize for interactive use. Config and database files are auto-created on first run. When the interactive menu opens, it animates with a smooth, rapid cascade to avoid abrupt screen flashes.
 
 ### 🎨 Version banner
 
@@ -115,7 +125,7 @@ On interactive startup `termgram` prints a tidy banner:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.0.1                              ║
+║  📡 termgram  v1.1.0                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 ```
@@ -123,7 +133,7 @@ On interactive startup `termgram` prints a tidy banner:
 In **CLI mode** the banner is collapsed to a single short line, so it never pollutes shell output:
 
 ```
-termgram v1.0.1
+termgram v1.1.0
 ```
 
 ---
@@ -152,47 +162,48 @@ pip install -r requirements.txt
 
 ## ⚙️ Setup
 
-### 1. Bot token
+### Unified configuration (`config.json`)
 
-Create a file named `token.txt` in the project root and put your bot token in it (single line):
+All configuration—bot token, proxy, and custom reactions—is stored in a single `config.json` file. You can create it from the provided template:
 
-```
-123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
-```
-
-Get a token from [@BotFather](https://t.me/BotFather).
-
-### 2. Proxy (optional)
-
-Create `proxy.txt` and put the proxy URL on a single line:
-
-```
-socks5://127.0.0.1:10808
+```bash
+cp config.json.example config.json
 ```
 
-Supported schemes: `socks5://`, `http://`, `https://`.
-If the file is missing or empty, `termgram` connects directly.
+Or simply launch `termgram` directly (`python3 termgram.py`): `termgram` will auto-generate `config.json` and `tg.db` on first run and interactively prompt you to enter a valid bot token!
 
-> 💡 On first run, `termgram` will auto-create `token.txt`, `proxy.txt`, `reactions.txt`, and `tg.db` if they don't exist.
+Example `config.json`:
 
-### 3. Custom reactions (optional)
-
-You don't need to create `reactions.txt` manually — `termgram` writes it on first run, seeded with the full built-in Telegram reaction list.
-
-To narrow it down, just edit `reactions.txt` (while the program is running is fine — it reloads on change):
-
+```json
+{
+  "token": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ",
+  "proxy": "socks5://127.0.0.1:10808",
+  "reactions": [
+    {
+      "emoji": "👍",
+      "label": "Thumbs Up"
+    },
+    {
+      "emoji": "👎",
+      "label": "Thumbs Down"
+    },
+    {
+      "emoji": "❤️",
+      "label": "Red Heart"
+    },
+    {
+      "emoji": "🔥",
+      "label": "Fire"
+    }
+  ]
+}
 ```
-👍 Like
-❤️ Love
-🔥 Fire
-🎉 Party
-😢 Sad
-```
 
-- The first token is the emoji that gets sent to Telegram.
-- Everything after the first space is a label shown in the numbered menu.
-- Lines starting with `#` are comments.
-- Delete the file and `termgram` falls back to the built-in list until you recreate it.
+1. **Bot token**: Get your token from [@BotFather](https://t.me/BotFather).
+2. **Proxy (optional)**: Supported schemes: `socks5://`, `http://`, `https://`. Set to `""` for direct connection.
+3. **Reactions**: Curated list of emoji reactions. Can be configured directly via **menu option 51) Manage reactions**.
+
+> 💡 **Automatic upgrade & migration**: If upgrading from an older version, `termgram` automatically reads existing `token.txt`, `proxy.txt`, and `reactions.txt`, migrates their settings into `config.json`, and cleans up the legacy files.
 
 ---
 
@@ -208,18 +219,18 @@ You'll see:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.0.1                              ║
+║  📡 termgram  v1.1.0                               ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
-✔ Created reactions.txt with 61 reactions
 Connecting to Telegram API...
 Using proxy: socks5://127.0.0.1:10808
 ✔ Bot connected: @YourBot (My Bot)
 
 =============== Telegram Bot Sender ===============
-          termgram v1.0.1
    1) Text message              2) Photo
    3) Animation (GIF)           4) Video
+   ...
+  50) Manage bot token         51) Manage reactions
    ...
    0) Exit
 ```
@@ -460,19 +471,15 @@ No connectivity prompt, no "press any key" — a single-shot command runs, print
 
 ---
 
-| File                    | Purpose                       | Committed?     |
-| ----------------------- | ----------------------------- | -------------- |
-| `termgram.py`           | Main program                  | ✅              |
-| `requirements.txt`      | Python dependencies           | ✅              |
-| `README.md`             | This file                     | ✅              |
-| `LICENSE`               | MIT license                   | ✅              |
-| `token.txt.example`     | Token template                | ✅              |
-| `proxy.txt.example`     | Proxy template                | ✅              |
-| `reactions.txt.example` | Reactions template            | ✅              |
-| `token.txt`             | Your real token               | ❌ (gitignored) |
-| `proxy.txt`             | Your real proxy               | ❌ (gitignored) |
-| `reactions.txt`         | Your reactions (auto-created) | ❌ (gitignored) |
-| `tg.db`                 | Local message database        | ❌ (gitignored) |
+| File                  | Purpose                                          | Committed?     |
+| --------------------- | ------------------------------------------------ | -------------- |
+| `termgram.py`         | Main program                                     | ✅              |
+| `requirements.txt`    | Python dependencies                              | ✅              |
+| `README.md`           | This file                                        | ✅              |
+| `LICENSE`             | MIT license                                      | ✅              |
+| `config.json.example` | Configuration template (token, proxy, reactions) | ✅              |
+| `config.json`         | Your real configuration & secrets                | ❌ (gitignored) |
+| `tg.db`               | Local message database                           | ❌ (gitignored) |
 
 ---
 

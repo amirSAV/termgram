@@ -16,19 +16,41 @@ import sqlite3
 import random
 from datetime import datetime, timezone
 import argparse
-import requests
 from typing import Optional, Dict, Any, List, Tuple
+
+# ============ Third-party Dependencies ============
+try:
+    import requests
+except ImportError:
+    _r = '\033[31m'
+    _y = '\033[33m'
+    _c = '\033[36m'
+    _n = '\033[0m'
+    print(f"\n{_r}✘ Error: Required dependency 'requests' is not installed!{_n}\n")
+    print(f"{_y}To run termgram, setting up a Python virtual environment is recommended:{_n}\n")
+    print("  1. Create virtual environment:")
+    print("     python3 -m venv venv\n")
+    print("  2. Activate virtual environment:")
+    print("     - Linux / macOS:                source venv/bin/activate")
+    print("     - Windows (PowerShell):         venv\\Scripts\\Activate.ps1")
+    print("     - Windows (Command Prompt):     venv\\Scripts\\activate.bat\n")
+    print("  3. Install dependencies:")
+    print("     pip install -r requirements.txt")
+    print("     (or manually: pip install requests PySocks)\n")
+    sys.exit(1)
 
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
-TOKEN_FILE = "token.txt"
-PROXY_FILE = "proxy.txt"
-REACTIONS_FILE = "reactions.txt"
+CONFIG_FILE = "config.json"
+LEGACY_TOKEN_FILE = "token.txt"
+LEGACY_PROXY_FILE = "proxy.txt"
+LEGACY_REACTIONS_FILE = "reactions.txt"
 DB_FILE = "tg.db"
+
 # ============ Full Telegram reactions (standard set) ============
 TELEGRAM_REACTIONS: List[Tuple[str, str]] = [
     ("👍", "Thumbs Up"),            ("👎", "Thumbs Down"),
@@ -64,22 +86,122 @@ TELEGRAM_REACTIONS: List[Tuple[str, str]] = [
     ("😼", "Cat Wry Smile"),        ("🤝", "Handshake"),
 ]
 
-def ensure_reactions_file() -> None:
-    if os.path.isfile(REACTIONS_FILE):
-        return
+def load_config() -> Dict[str, Any]:
+    """Load configuration from config.json. Auto-creates and migrates legacy files if needed."""
+    default_config: Dict[str, Any] = {
+        "token": "",
+        "proxy": "",
+        "reactions": [
+            {"emoji": emoji, "label": name} for emoji, name in TELEGRAM_REACTIONS
+        ]
+    }
+
+    config: Dict[str, Any] = dict(default_config)
+
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                config.update(loaded)
+                if "reactions" not in config or not isinstance(config["reactions"], list):
+                    config["reactions"] = default_config["reactions"]
+        except Exception as e:
+            print(f"{Y}⚠ Warning: Could not parse {CONFIG_FILE}: {e}{N}")
+    else:
+        # Check for legacy files to migrate
+        if os.path.isfile(LEGACY_TOKEN_FILE):
+            try:
+                with open(LEGACY_TOKEN_FILE, "r", encoding="utf-8") as f:
+                    t = f.read().strip()
+                    if t:
+                        config["token"] = t
+            except Exception:
+                pass
+        if os.path.isfile(LEGACY_PROXY_FILE):
+            try:
+                with open(LEGACY_PROXY_FILE, "r", encoding="utf-8") as f:
+                    p = f.read().strip()
+                    if p:
+                        config["proxy"] = p
+            except Exception:
+                pass
+        if os.path.isfile(LEGACY_REACTIONS_FILE):
+            try:
+                legacy_reactions = []
+                with open(LEGACY_REACTIONS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split(" ", 1)
+                        emoji = parts[0]
+                        name = parts[1] if len(parts) > 1 else ""
+                        if emoji:
+                            legacy_reactions.append({"emoji": emoji, "label": name})
+                if legacy_reactions:
+                    config["reactions"] = legacy_reactions
+            except Exception:
+                pass
+
+        # Write the initial / migrated config.json
+        save_config(config)
+
+    # Clean up legacy files if present
+    for legacy_f in (LEGACY_TOKEN_FILE, LEGACY_PROXY_FILE, LEGACY_REACTIONS_FILE):
+        if os.path.isfile(legacy_f):
+            try:
+                os.remove(legacy_f)
+            except Exception:
+                pass
+
+    return config
+
+
+def save_config(config: Dict[str, Any]) -> bool:
+    """Save configuration to config.json atomically."""
     try:
-        with open(REACTIONS_FILE, "w", encoding="utf-8") as f:
-            f.write("# termgram reactions file\n")
-            f.write("# Format: <emoji> <label>   (one per line)\n")
-            f.write("# The FIRST token is the emoji that gets sent to Telegram.\n")
-            f.write("# Everything after the first space is just a label.\n")
-            f.write("# Lines starting with # are ignored.\n")
-            f.write("# Edit this file while termgram is running — it reloads automatically.\n\n")
-            for emoji, name in TELEGRAM_REACTIONS:
-                f.write(f"{emoji} {name}\n")
-        print(f"{G}✔ Created {REACTIONS_FILE} with {len(TELEGRAM_REACTIONS)} reactions{N}")
+        tmp_file = f"{CONFIG_FILE}.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_file, CONFIG_FILE)
+        return True
     except Exception as e:
-        print(f"{Y}⚠ Could not create {REACTIONS_FILE}: {e}{N}")
+        print(f"{R}✘ Error saving {CONFIG_FILE}: {e}{N}")
+        return False
+
+
+def get_config_token() -> str:
+    cfg = load_config()
+    return str(cfg.get("token", "")).strip()
+
+
+def set_config_token(token: str) -> bool:
+    cfg = load_config()
+    cfg["token"] = token.strip()
+    return save_config(cfg)
+
+
+def get_config_proxy() -> str:
+    cfg = load_config()
+    return str(cfg.get("proxy", "")).strip()
+
+
+def set_config_proxy(proxy: str) -> bool:
+    cfg = load_config()
+    cfg["proxy"] = proxy.strip()
+    return save_config(cfg)
+
+
+def ensure_db() -> None:
+    """Ensure local SQLite database schema is initialized without error."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        db_init(conn)
+        conn.close()
+    except Exception as e:
+        print(f"{Y}⚠ Could not initialize database {DB_FILE}: {e}{N}")
 
 # ============ Colors ============
 G = '\033[32m'
@@ -103,8 +225,9 @@ class TelegramBot:
         self.file_api = f"https://api.telegram.org/file/bot{token}"
         self.session = requests.Session()
         self.bot_id: Optional[int] = None
-        self.ask_retry: bool = True   # ← اضافه کن (preference کاربر)
-        self.max_attempts: int = 10   # ← اضافه کن (سقف بیمعنی برای حلقه بیپایان)
+        self.bot_info: Optional[dict] = None
+        self.ask_retry: bool = True   # Prompt user to retry on transient failures
+        self.max_attempts: int = 10   # Safety limit to prevent infinite loops
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
 
@@ -747,25 +870,36 @@ def show_info_result(result: Optional[dict]):
         print(f"{R}✘ Failed:{N}")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
-_REACTIONS_CACHE: Dict[str, Any] = {"mtime": None, "size": None, "data": None}
-
 def load_reactions() -> List[Tuple[str, str]]:
-    """Load reactions from reactions.txt if present, otherwise the built-in list."""
-    reactions = []
-    if os.path.isfile(REACTIONS_FILE):
-        with open(REACTIONS_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split(" ", 1)
-                emoji = parts[0]
-                name = parts[1] if len(parts) > 1 else ""
+    """Load reactions from config.json, fallback to built-in TELEGRAM_REACTIONS."""
+    cfg = load_config()
+    raw = cfg.get("reactions")
+    res: List[Tuple[str, str]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                emoji = str(item.get("emoji", "")).strip()
+                label = str(item.get("label", "")).strip()
                 if emoji:
-                    reactions.append((emoji, name))
-    if not reactions:
-        reactions = list(TELEGRAM_REACTIONS)
-    return reactions
+                    res.append((emoji, label))
+            elif isinstance(item, (list, tuple)) and len(item) > 0:
+                emoji = str(item[0]).strip()
+                label = str(item[1]).strip() if len(item) > 1 else ""
+                if emoji:
+                    res.append((emoji, label))
+            elif isinstance(item, str) and item.strip():
+                res.append((item.strip(), ""))
+    if not res:
+        res = list(TELEGRAM_REACTIONS)
+    return res
+
+
+def save_reactions(reactions: List[Tuple[str, str]]) -> bool:
+    """Save reactions list to config.json."""
+    cfg = load_config()
+    cfg["reactions"] = [{"emoji": emoji, "label": label} for emoji, label in reactions]
+    return save_config(cfg)
+
 
 
 def pick_reaction() -> Optional[str]:
@@ -1181,14 +1315,12 @@ def configure_proxy_menu(bot: TelegramBot):
         p = input("proxy url (e.g. socks5://127.0.0.1:10808): ").strip()
         if p:
             bot.set_proxy(p)
-            with open(PROXY_FILE, "w", encoding="utf-8") as f:
-                f.write(p)
-            print(f"{G}✔ Proxy set{N}")
+            set_config_proxy(p)
+            print(f"{G}✔ Proxy set and saved to {CONFIG_FILE}{N}")
     elif c == "2":
         bot.set_proxy("")
-        if os.path.isfile(PROXY_FILE):
-            os.remove(PROXY_FILE)
-        print(f"{G}✔ Proxy cleared{N}")
+        set_config_proxy("")
+        print(f"{G}✔ Proxy cleared and saved to {CONFIG_FILE}{N}")
     elif c == "3":
         r = bot.post("getMe")
         show_info_result(r)
@@ -2977,48 +3109,204 @@ def chat_history_viewer(bot: TelegramBot):
         conn.close()
 
 
+def manage_bot_token_menu(bot: TelegramBot):
+    """Submenu for viewing, updating, and testing the bot token."""
+    while True:
+        token = get_config_token()
+        masked = (token[:9] + "..." + token[-4:]) if len(token) > 13 else (token or "(not configured)")
+        bot_user = f"@{bot.bot_info.get('username')}" if getattr(bot, "bot_info", None) and bot.bot_info.get("username") else "Not connected / Unknown"
+
+        print(f"\n{B}--- Manage Bot Token ---{N}")
+        print(f"  Current Token : {masked}")
+        print(f"  Connected Bot : {bot_user}")
+        print("  1) Show full token")
+        print("  2) Change / update token (validates with Telegram API)")
+        print("  3) Test token connectivity (getMe)")
+        print("  0) Back")
+
+        c = input("choice: ").strip()
+        if c == "1":
+            print(f"\n{Y}Bot Token:{N} {token if token else '(none)'}")
+        elif c == "2":
+            new_tok = input("\nEnter new bot token (empty to cancel): ").strip()
+            if not new_tok:
+                print(f"{Y}Cancelled.{N}")
+                continue
+            print(f"{Y}Validating token with Telegram API...{N}")
+            test_bot = TelegramBot(new_tok, PROXY)
+            resp = test_bot.post("getMe", ask_retry=False)
+            if resp and resp.get("ok"):
+                info = resp["result"]
+                bot.token = new_tok
+                bot.base_url = f"https://api.telegram.org/bot{new_tok}"
+                bot.file_api = f"https://api.telegram.org/file/bot{new_tok}"
+                bot.bot_id = info.get("id")
+                bot.bot_info = info
+                set_config_token(new_tok)
+                print(f"{G}✔ Token valid and updated! Connected as @{info.get('username', '?')} ({info.get('first_name', '?')}){N}")
+            else:
+                desc = resp.get("description", "Unknown error") if resp else "Connection error"
+                err_code = resp.get("error_code", "NetError") if resp else "NetError"
+                print(f"{R}✘ Telegram API rejected token ({err_code}): {desc}{N}")
+                ans = input("Do you still want to save this token to config? [y/N]: ").strip()
+                if ans.lower() == "y":
+                    bot.token = new_tok
+                    bot.base_url = f"https://api.telegram.org/bot{new_tok}"
+                    bot.file_api = f"https://api.telegram.org/file/bot{new_tok}"
+                    set_config_token(new_tok)
+                    print(f"{Y}Token saved to {CONFIG_FILE}.{N}")
+        elif c == "3":
+            resp = bot.post("getMe")
+            show_info_result(resp)
+            if resp and resp.get("ok"):
+                bot.bot_info = resp["result"]
+        elif c == "0":
+            break
+        else:
+            print(f"{R}invalid choice{N}")
+
+
+def manage_reactions_menu():
+    """Submenu for viewing, adding, removing, and resetting reactions."""
+    while True:
+        reactions = load_reactions()
+        print(f"\n{B}--- Manage Reactions ---{N}")
+        print(f"  Configured reactions: {len(reactions)}")
+        print("  1) List all configured reactions")
+        print("  2) Add / update reaction")
+        print("  3) Remove a reaction")
+        print("  4) Reset to Telegram default set (61 reactions)")
+        print("  0) Back")
+
+        c = input("choice: ").strip()
+        if c == "1":
+            print(f"\n{B}--- Configured Reactions ({len(reactions)}) ---{N}")
+            cols = 3
+            per_col = (len(reactions) + cols - 1) // cols
+            for row in range(per_col):
+                line = "  "
+                for col_idx in range(cols):
+                    i = row + col_idx * per_col
+                    if i < len(reactions):
+                        emoji, name = reactions[i]
+                        cell = f"{i + 1:>2}) {emoji}  {name[:20]}"
+                        line += cell.ljust(32)
+                print(line)
+        elif c == "2":
+            emoji = input("\nEnter emoji (e.g. 🔥): ").strip()
+            if not emoji:
+                print(f"{R}Emoji is required.{N}")
+                continue
+            name = input("Enter description / label (e.g. Fire): ").strip()
+            updated = False
+            new_reactions = []
+            for em, nm in reactions:
+                if em == emoji:
+                    new_reactions.append((em, name if name else nm))
+                    updated = True
+                else:
+                    new_reactions.append((em, nm))
+            if not updated:
+                new_reactions.append((emoji, name))
+            save_reactions(new_reactions)
+            print(f"{G}✔ Reaction '{emoji}' ({name}) saved to {CONFIG_FILE}!{N}")
+        elif c == "3":
+            if not reactions:
+                print(f"{Y}No reactions configured.{N}")
+                continue
+            val = input("\nEnter reaction number or emoji to remove: ").strip()
+            if not val:
+                continue
+            idx_to_remove = None
+            if val.isdigit():
+                idx = int(val) - 1
+                if 0 <= idx < len(reactions):
+                    idx_to_remove = idx
+            if idx_to_remove is None:
+                for i, (em, _) in enumerate(reactions):
+                    if em == val:
+                        idx_to_remove = i
+                        break
+            if idx_to_remove is not None:
+                removed_em, removed_name = reactions[idx_to_remove]
+                new_reactions = [r for i, r in enumerate(reactions) if i != idx_to_remove]
+                save_reactions(new_reactions)
+                print(f"{G}✔ Removed reaction: {removed_em} ({removed_name}){N}")
+            else:
+                print(f"{R}Reaction not found.{N}")
+        elif c == "4":
+            ans = input(f"Reset reactions to default Telegram set ({len(TELEGRAM_REACTIONS)} reactions)? [y/N]: ").strip()
+            if ans.lower() == "y":
+                save_reactions(list(TELEGRAM_REACTIONS))
+                print(f"{G}✔ Reactions reset to default Telegram set!{N}")
+        elif c == "0":
+            break
+        else:
+            print(f"{R}invalid choice{N}")
+
+
+def render_animated_menu(lines: List[str], delay: float = 0.005) -> None:
+    """Print menu lines with a fast cascading animation for a smooth, non-jarring appearance."""
+    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    for line in lines:
+        print(line)
+        if is_tty and delay > 0:
+            time.sleep(delay)
+
+
+def format_menu_row(n1: int, t1: str, n2: Optional[int] = None, t2: Optional[str] = None) -> str:
+    if n2 is not None and t2 is not None:
+        return f"  {n1:2d}) {t1:<22s}   {n2:2d}) {t2:<22s}"
+    return f"  {n1:2d}) {t1}"
+
+
 def print_menu_row(n1, t1, n2, t2):
-    print(f"  {n1:2d}) {t1:<22s}   {n2:2d}) {t2:<22s}")
+    print(format_menu_row(n1, t1, n2, t2))
 
 
 def main_menu(bot: TelegramBot):
     while True:
-        print(f"\n{G}=============== Telegram Bot Sender ==============={N}")
-        print_menu_row(1, "Text message", 2, "Photo")
-        print_menu_row(3, "Animation (GIF)", 4, "Video")
-        print_menu_row(5, "Document / File", 6, "Audio")
-        print_menu_row(7, "Voice", 8, "Video note")
-        print_menu_row(9, "Sticker", 10, "Location")
-        print_menu_row(11, "Contact", 12, "Poll")
-        print_menu_row(13, "Dice", 14, "Reaction")
-        print_menu_row(15, "Edit message", 16, "Delete message")
-        print(f"{B}--- Management ------------------------------------{N}")
-        print_menu_row(17, "Configure proxy", 18, "Bot info (getMe)")
-        print_menu_row(19, "Leave chat", 20, "Get chat info")
-        print_menu_row(21, "Member count", 22, "Pin message")
-        print_menu_row(23, "Unpin message", 24, "Forward message")
-        print_menu_row(25, "Chat action", 26, "Ban user")
-        print_menu_row(27, "Unban user", 28, "Set chat title")
-        print_menu_row(29, "Set chat desc", 30, "Set admin title")
-        print_menu_row(31, "Set bot name", 32, "Create invite link")
-        print(f"{B}--- Bot Profile -----------------------------------{N}")
-        print_menu_row(33, "Set bio (desc)", 34, "Set short bio")
-        print_menu_row(35, "Set profile photo", 36, "Remove photo")
-        print("  49) Get current profile")
-        print(f"{B}--- Files -----------------------------------------{N}")
-        print_menu_row(37, "Download by id", 38, "Upload & get id")
-        print(f"{B}--- Monitor ---------------------------------------{N}")
-        print_menu_row(39, "Monitor mode", 40, "Reply other chat")
-        print(f"{B}--- Admin / Members -------------------------------{N}")
-        print_menu_row(41, "Member info", 42, "Promote admin")
-        print_menu_row(43, "Demote admin", 44, "Set user title")
-        print("  45) Set member tag")
-        print(f"{B}--- Data / DB -------------------------------------{N}")
-        print_menu_row(46, "Silent fetch", 47, "Chat explorer")
-        print("  48) History viewer")
-        print()
-        print("   0) Exit")
-        print()
+        menu_lines = [
+            f"\n{G}=============== Telegram Bot Sender ==============={N}",
+            format_menu_row(1, "Text message", 2, "Photo"),
+            format_menu_row(3, "Animation (GIF)", 4, "Video"),
+            format_menu_row(5, "Document / File", 6, "Audio"),
+            format_menu_row(7, "Voice", 8, "Video note"),
+            format_menu_row(9, "Sticker", 10, "Location"),
+            format_menu_row(11, "Contact", 12, "Poll"),
+            format_menu_row(13, "Dice", 14, "Reaction"),
+            format_menu_row(15, "Edit message", 16, "Delete message"),
+            f"{B}--- Settings & Config -----------------------------{N}",
+            format_menu_row(50, "Manage bot token", 51, "Manage reactions"),
+            format_menu_row(17, "Configure proxy", 18, "Bot info (getMe)"),
+            f"{B}--- Chat Management -------------------------------{N}",
+            format_menu_row(19, "Leave chat", 20, "Get chat info"),
+            format_menu_row(21, "Member count", 22, "Pin message"),
+            format_menu_row(23, "Unpin message", 24, "Forward message"),
+            format_menu_row(25, "Chat action", 26, "Ban user"),
+            format_menu_row(27, "Unban user", 28, "Set chat title"),
+            format_menu_row(29, "Set chat desc", 30, "Set admin title"),
+            format_menu_row(31, "Set bot name", 32, "Create invite link"),
+            f"{B}--- Bot Profile -----------------------------------{N}",
+            format_menu_row(33, "Set bio (desc)", 34, "Set short bio"),
+            format_menu_row(35, "Set profile photo", 36, "Remove photo"),
+            "  49) Get current profile",
+            f"{B}--- Files -----------------------------------------{N}",
+            format_menu_row(37, "Download by id", 38, "Upload & get id"),
+            f"{B}--- Monitor ---------------------------------------{N}",
+            format_menu_row(39, "Monitor mode", 40, "Reply other chat"),
+            f"{B}--- Admin / Members -------------------------------{N}",
+            format_menu_row(41, "Member info", 42, "Promote admin"),
+            format_menu_row(43, "Demote admin", 44, "Set user title"),
+            "  45) Set member tag",
+            f"{B}--- Data / DB -------------------------------------{N}",
+            format_menu_row(46, "Silent fetch", 47, "Chat explorer"),
+            "  48) History viewer",
+            "",
+            "   0) Exit",
+            ""
+        ]
+        render_animated_menu(menu_lines, delay=0.005)
 
         choice = input("choice: ").strip()
         actions = {
@@ -3070,6 +3358,9 @@ def main_menu(bot: TelegramBot):
             "46": lambda: silent_fetch(bot),
             "47": lambda: chat_explorer(bot),
             "48": lambda: chat_history_viewer(bot),
+            "49": lambda: get_bot_profile(bot),
+            "50": lambda: manage_bot_token_menu(bot),
+            "51": lambda: manage_reactions_menu(),
             "0":  lambda: None,
         }
 
@@ -3726,47 +4017,94 @@ def main():
     else:
         print_banner()
 
-    # --- token ---
-    if not os.path.isfile(TOKEN_FILE):
-        print(f"ERROR: token file not found: {TOKEN_FILE}", file=sys.stderr)
-        sys.exit(1)
+    # --- bootstrap config & database ---
+    config = load_config()
+    ensure_db()
 
-    with open(TOKEN_FILE, encoding="utf-8") as f:
-        token = f.read().strip()
-    if not token:
-        print("ERROR: token is empty", file=sys.stderr)
-        sys.exit(1)
-
-    ensure_reactions_file()
-    proxy_url = ""
-    if os.path.isfile(PROXY_FILE):
-        with open(PROXY_FILE, encoding="utf-8") as f:
-            proxy_url = f.read().strip()
+    token = str(config.get("token", "")).strip()
+    proxy_url = str(config.get("proxy", "")).strip()
     PROXY = proxy_url
 
-    bot = TelegramBot(token, proxy_url)
-
-    # --- CLI mode: no connectivity prompt, just run ---
+    # --- CLI mode: run one-shot command ---
     if cli_mode:
+        if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+            sys.exit(run_cli(None, sys.argv[1:]))
+        if not token:
+            print(f"{R}ERROR: bot token is not configured in {CONFIG_FILE}. Run termgram interactively or edit {CONFIG_FILE}.{N}", file=sys.stderr)
+            sys.exit(1)
+        bot = TelegramBot(token, proxy_url)
         sys.exit(run_cli(bot, sys.argv[1:]))
 
-    # --- interactive mode: full banner already printed, do connectivity test ---
-    print(f"{Y}Connecting to Telegram API...{N}")
-    if proxy_url:
-        print(f"{Y}Using proxy: {proxy_url}{N}")
-    resp = bot.post("getMe")
-    if resp and resp.get("ok"):
-        bot_info = resp["result"]
-        print(f"{G}✔ Bot connected: @{bot_info.get('username', '?')} "
-              f"({bot_info.get('first_name', '?')}){N}")
-        bot.bot_id = bot_info["id"]
-    else:
-        print(f"{R}✘ Could not connect to Telegram API{N}")
-        if resp:
-            print(json.dumps(resp, indent=2, ensure_ascii=False))
-        ans = input("Continue anyway? [y/N]: ").strip()
-        if ans.lower() != "y":
-            sys.exit(1)
+    # --- Interactive mode: ensure valid bot token ---
+    bot = TelegramBot(token, proxy_url)
+    while True:
+        if not token:
+            print(f"\n{Y}⚠ No bot token found in {CONFIG_FILE}.{N}")
+            new_tok = input("Enter bot token (or 'q' to exit): ").strip()
+            if not new_tok or new_tok.lower() == 'q':
+                print(f"{Y}Exiting.{N}")
+                sys.exit(0)
+            token = new_tok
+            bot = TelegramBot(token, proxy_url)
+
+        print(f"\n{Y}Connecting to Telegram API...{N}")
+        if proxy_url:
+            print(f"{Y}Using proxy: {proxy_url}{N}")
+
+        resp = bot.post("getMe", ask_retry=False)
+        if resp and resp.get("ok"):
+            bot_info = resp["result"]
+            bot.bot_id = bot_info.get("id")
+            bot.bot_info = bot_info
+            if get_config_token() != token:
+                set_config_token(token)
+            print(f"{G}✔ Bot connected: @{bot_info.get('username', '?')} ({bot_info.get('first_name', '?')}){N}")
+            break
+
+        # Check if Telegram server explicitly confirmed the token is invalid
+        if resp and resp.get("error_code") in (401, 404):
+            desc = resp.get("description", "Unauthorized")
+            err_code = resp.get("error_code")
+            print(f"\n{R}✘ Invalid bot token! Telegram server rejected the token ({err_code}: {desc}){N}")
+            print(f"{Y}Please enter a valid bot token to continue, or 'q' to exit.{N}")
+            new_tok = input("Enter valid bot token (or 'q' to exit): ").strip()
+            if not new_tok or new_tok.lower() == 'q':
+                print(f"{Y}Exiting.{N}")
+                sys.exit(1)
+            token = new_tok
+            bot = TelegramBot(token, proxy_url)
+            continue
+        else:
+            # Network failure, proxy timeout, or other issue
+            print(f"\n{R}✘ Could not connect to Telegram API{N}")
+            if resp:
+                print(json.dumps(resp, indent=2, ensure_ascii=False))
+            else:
+                print(f"{Y}Connection failed. Please check your internet connection or proxy settings.{N}")
+
+            print(f"\n  1) Retry connection")
+            print(f"  2) Enter a new bot token")
+            print(f"  3) Configure proxy")
+            print(f"  4) Continue anyway (offline)")
+            print(f"  0) Exit")
+            ans = input("choice [1/2/3/4/0]: ").strip()
+            if ans == "1":
+                continue
+            elif ans == "2":
+                new_tok = input("Enter bot token: ").strip()
+                if new_tok:
+                    token = new_tok
+                    bot = TelegramBot(token, proxy_url)
+                continue
+            elif ans == "3":
+                configure_proxy_menu(bot)
+                proxy_url = PROXY
+                continue
+            elif ans == "4":
+                break
+            else:
+                print(f"{Y}Exiting.{N}")
+                sys.exit(0)
 
     main_menu(bot)
 
