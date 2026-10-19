@@ -1,38 +1,17 @@
 {
   "token": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ",
   "proxy": "socks5://127.0.0.1:10808",
+  "base_url": "",
+  "api_server_enabled": false,
+  "api_server_host": "127.0.0.1",
+  "api_server_port": 8080,
+  "api_server_token": "",
+  "guest_chat_mode": false,
+  "locked_chat_id": "",
   "reactions": [
-    {
-      "emoji": "👍",
-      "label": "Thumbs Up"
-    },
-    {
-      "emoji": "👎",
-      "label": "Thumbs Down"
-    },
-    {
-      "emoji": "❤️",
-      "label": "Red Heart"
-    },
-    {
-      "emoji": "🔥",
-      "label": "Fire"
-    },
-    {
-      "emoji": "🥰",
-      "label": "Smiling Face w/ Hearts"
-    },
-    {
-      "emoji": "👏",
-      "label": "Clapping Hands"
-    },
-    {
-      "emoji": "🎉",
-      "label": "Party Popper"
-    },
-    {
-      "emoji": "😢",
-      "label": "Crying Face"
-    }
+    { "emoji": "👍", "label": "Thumbs Up" },
+    { "emoji": "👎", "label": "Thumbs Down" },
+    { "emoji": "❤️", "label": "Red Heart" },
+    { "emoji": "🔥", "label": "Fire" }
   ]
 }

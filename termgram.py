@@ -14,6 +14,7 @@ import json
 import time
 import sqlite3
 import random
+import html
 from datetime import datetime, timezone
 import argparse
 from typing import Optional, Dict, Any, List, Tuple
@@ -41,7 +42,7 @@ except ImportError:
 
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
@@ -91,6 +92,13 @@ def load_config() -> Dict[str, Any]:
     default_config: Dict[str, Any] = {
         "token": "",
         "proxy": "",
+        "base_url": "",
+        "api_server_enabled": False,
+        "api_server_host": "127.0.0.1",
+        "api_server_port": 8080,
+        "api_server_token": "",
+        "guest_chat_mode": False,
+        "locked_chat_id": "",
         "reactions": [
             {"emoji": emoji, "label": name} for emoji, name in TELEGRAM_REACTIONS
         ]
@@ -193,6 +201,29 @@ def set_config_proxy(proxy: str) -> bool:
     cfg["proxy"] = proxy.strip()
     return save_config(cfg)
 
+def get_config_base_url() -> str:
+    return str(load_config().get("base_url", "")).strip()
+
+def set_config_base_url(url: str) -> bool:
+    cfg = load_config()
+    cfg["base_url"] = url.strip()
+    return save_config(cfg)
+
+def get_locked_chat_id() -> str:
+    return str(load_config().get("locked_chat_id", "")).strip()
+
+def set_locked_chat_id(cid: str) -> bool:
+    cfg = load_config()
+    cfg["locked_chat_id"] = str(cid).strip()
+    return save_config(cfg)
+
+def get_guest_chat_mode() -> bool:
+    return bool(load_config().get("guest_chat_mode", False))
+
+def set_guest_chat_mode(on: bool) -> bool:
+    cfg = load_config()
+    cfg["guest_chat_mode"] = bool(on)
+    return save_config(cfg)
 
 def ensure_db() -> None:
     """Ensure local SQLite database schema is initialized without error."""
@@ -219,10 +250,11 @@ PROXY = ""
 #  TelegramBot – HTTP client (replaces curl)
 # ================================================================
 class TelegramBot:
-    def __init__(self, token: str, proxy_url: str = ""):
+    def __init__(self, token: str, proxy_url: str = "", base_url: Optional[str] = None):
         self.token = token
-        self.base_url = f"https://api.telegram.org/bot{token}"
-        self.file_api = f"https://api.telegram.org/file/bot{token}"
+        _root = (base_url or "https://api.telegram.org").rstrip("/")
+        self.base_url = f"{_root}/bot{token}"
+        self.file_api = f"{_root}/file/bot{token}"
         self.session = requests.Session()
         self.bot_id: Optional[int] = None
         self.bot_info: Optional[dict] = None
@@ -450,6 +482,18 @@ def db_init(conn: sqlite3.Connection) -> None:
         ON message_reactions(chat_id, message_id);
     CREATE INDEX IF NOT EXISTS idx_reactions_user
         ON message_reactions(user_id);
+
+    CREATE TABLE IF NOT EXISTS managed_bots (
+        bot_id INTEGER PRIMARY KEY,
+        username TEXT, first_name TEXT,
+        token TEXT,
+        added_at TEXT, last_seen_at TEXT, updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS bot_permissions (
+        bot_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+        permissions_json TEXT,
+        PRIMARY KEY (bot_id, chat_id)
+    );
     """)
     conn.commit()
 
@@ -780,11 +824,55 @@ def ask_inline_buttons() -> Optional[str]:
 
 def read_common(allow_buttons: bool = True) -> Optional[dict]:
     print(f"\n{B}--- Common fields ---{N}")
-    chat_id = input("chat_id (number or @username): ").strip()
-    if not chat_id:
-        print(f"{R}chat_id is required{N}")
-        return None
-    reply_to = input("reply_to_message_id (empty = no reply): ").strip() or None
+    locked = get_locked_chat_id()
+    if locked:
+        chat_id = locked
+        print(f"{G}chat_id (locked): {chat_id}{N}")
+    else:
+        chat_id = input("chat_id (number or @username): ").strip()
+        if not chat_id:
+            print(f"{R}chat_id is required{N}")
+            return None
+
+    reply_to = None
+    reply_params = None
+    ans = input("reply_to_message_id (empty = no reply): ").strip()
+    if ans:
+        # cross-chat?
+        cross = input("  ↳ cross-chat reply (source msg in another chat)? [y/N]: ").strip().lower()
+        src_chat = None
+        if cross == "y":
+            src_chat = input("  ↳ source chat_id (where the original message lives): ").strip()
+            if not src_chat:
+                print(f"{R}  source chat_id required — falling back to same-chat reply{N}")
+                src_chat = None
+
+        # quote part of message?
+        quote = None
+        qa = input("  ↳ quote a specific part of the message? [y/N]: ").strip().lower()
+        if qa == "y":
+            quote = input("  ↳ quote text (must be an exact substring of the original): ")
+            if not quote or not quote.strip():
+                quote = None
+                print(f"{Y}  empty quote — ignoring{N}")
+
+        # build reply primitive
+        if quote or src_chat:
+            try:
+                msg_val = int(ans)
+            except ValueError:
+                msg_val = ans
+            rp: Dict[str, Any] = {"message_id": msg_val}
+            if src_chat:
+                rp["chat_id"] = (int(src_chat)
+                                 if str(src_chat).lstrip('-').isdigit()
+                                 else src_chat)
+            if quote:
+                rp["quote"] = quote
+            reply_params = rp
+        else:
+            reply_to = ans
+
     parse_mode = input("parse_mode [Markdown/HTML/MarkdownV2] (empty = none): ").strip() or None
     ans = input("disable_notification? [y/N]: ").strip()
     disable_notif = ans.lower() == "y"
@@ -796,6 +884,7 @@ def read_common(allow_buttons: bool = True) -> Optional[dict]:
     return {
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
+        "reply_parameters": reply_params,   # ← جدید
         "parse_mode": parse_mode,
         "disable_notification": disable_notif,
         "protect_content": protect,
@@ -805,7 +894,9 @@ def read_common(allow_buttons: bool = True) -> Optional[dict]:
 
 def build_data(common: dict, extra: dict = None) -> dict:
     data = {"chat_id": common["chat_id"]}
-    if common.get("reply_to_message_id"):
+    if common.get("reply_parameters"):
+        data["reply_parameters"] = json.dumps(common["reply_parameters"], ensure_ascii=False)
+    elif common.get("reply_to_message_id"):
         data["reply_to_message_id"] = common["reply_to_message_id"]
     if common.get("parse_mode"):
         data["parse_mode"] = common["parse_mode"]
@@ -850,10 +941,14 @@ def show_send_result(result: Optional[dict]):
         print(f"{R}✘ No response from server{N}")
         return
     if result.get("ok"):
-        print(f"{G}✔ Sent successfully{N}")
-        msg_id = result.get("result", {}).get("message_id")
-        if msg_id:
-            print(f"{G}📨 message_id: {msg_id}{N}")
+        res = result.get("result")
+        if isinstance(res, dict):
+            msg_id = res.get("message_id")
+            if msg_id:
+                print(f"{G}✔ Success{N}")
+                print(f"{G}📨 message_id: {msg_id}{N}")
+                return
+        print(f"{G}✔ Success{N}")
     else:
         print(f"{R}✘ Failed:{N}")
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -1276,24 +1371,174 @@ def edit_message(bot: TelegramBot):
     else:
         print(f"{R}invalid choice{N}")
 
+def _pick_chat_required(conn) -> Optional[int]:
+    """Show chats in DB and let user pick one (required — no 'all chats' option).
+       Respects locked_chat_id. Returns int chat_id or None (cancelled)."""
+    locked = get_locked_chat_id()
+    if locked:
+        if locked.lstrip('-').isdigit():
+            print(f"{G}chat_id (locked): {locked}{N}")
+            return int(locked)
+        print(f"{G}chat_id (locked, username): {locked}{N}")
+        return None  # username locked — caller should handle
+
+    rows = conn.execute(
+        """SELECT m.chat_id, COUNT(*) cnt, MAX(m.date) last_date,
+                  e.title, e.first_name, e.last_name, e.username, e.kind
+             FROM messages m
+             LEFT JOIN entities e ON e.id = m.chat_id
+            GROUP BY m.chat_id
+            ORDER BY last_date DESC""").fetchall()
+
+    print(f"\n{B}--- Chats in DB ---{N}")
+    if not rows:
+        print(f"{Y}No chats in DB yet. Run Monitor / Silent fetch first, "
+              f"or enter an id manually.{N}")
+    else:
+        for i, r in enumerate(rows, 1):
+            cid, cnt, last_date, title, fn, ln, un, kind = r
+            label = title or (fn and f"{fn} {ln or ''}".strip()) or str(cid)
+            uname = f" @{un}" if un else ""
+            print(f"  {i:>3}) {label:<28} [{kind or '?':<10}] "
+                  f"id={cid}  msgs={cnt}  last={_fmt_ts(last_date)}{uname}")
+
+    print("    m) Manual chat_id")
+    print("    0) Cancel")
+    sel = input("\nSelect chat: ").strip().lower()
+    if not sel or sel == "0":
+        return None
+    if sel == "m" or not rows:
+        cid = input("chat_id: ").strip()
+        if cid.lstrip('-').isdigit():
+            return int(cid)
+        print(f"{Y}non-numeric chat_id accepted as @username by caller{N}")
+        return cid  # type: ignore
+    if sel.isdigit() and 1 <= int(sel) <= len(rows):
+        return rows[int(sel) - 1][0]
+    print(f"{R}invalid selection{N}")
+    return None
 
 def delete_message(bot: TelegramBot):
-    print(f"\n{B}--- Delete Message ---{N}")
-    chat_id = input("chat_id (number or @username): ").strip()
+    print(f"\n{B}--- Delete Message(s) ---{N}")
+    _conn = sqlite3.connect(DB_FILE); db_init(_conn)
+    try:
+        chat_id = _pick_chat_required(_conn)
+    finally:
+        _conn.close()
     if not chat_id:
-        print(f"{R}chat_id is required{N}")
+        print(f"{Y}cancelled.{N}")
         return
+
+    mode = (input("Delete [1] single message or [2] range of message_ids? [1/2]: ")
+            .strip() or "1")
+
+    # ======================== RANGE MODE ========================
+    if mode == "2":
+        start_raw = input("from message_id: ").strip()
+        end_raw   = input("to   message_id: ").strip()
+        if not (start_raw.isdigit() and end_raw.isdigit()):
+            print(f"{R}both must be positive integers{N}")
+            return
+        start_id, end_id = int(start_raw), int(end_raw)
+        if start_id > end_id:
+            start_id, end_id = end_id, start_id
+        total = end_id - start_id + 1
+        if total > 5000:
+            print(f"{Y}⚠ {total} messages — this will take a while and may hit rate limits{N}")
+        if input(f"Confirm deleting {total} messages ({start_id}..{end_id}) in {chat_id}? "
+                 f"[y/N]: ").strip().lower() != "y":
+            print(f"{Y}cancelled.{N}")
+            return
+        try:
+            delay = float(input("delay between deletes in seconds (default 0.05): ").strip()
+                          or "0.05")
+        except ValueError:
+            delay = 0.05
+
+        ok = skipped = fail = rate_waits = 0
+        failed_ids: List[int] = []
+
+        for mid in range(start_id, end_id + 1):
+            r = bot.post("deleteMessage", data={
+                "chat_id": chat_id, "message_id": str(mid),
+            }, ask_retry=False)
+
+            if r and r.get("ok"):
+                ok += 1
+                print(f"  {G}✔{N} {mid}")
+                time.sleep(delay)
+                continue
+
+            desc = (r.get("description") if isinstance(r, dict) else "") or "no response"
+            dl   = desc.lower()
+            err  = r.get("error_code") if isinstance(r, dict) else None
+
+            # honor flood-control
+            if err == 429 or "too many requests" in dl:
+                wait = 5
+                if isinstance(r, dict):
+                    wait = (r.get("parameters") or {}).get("retry_after", 5)
+                print(f"  {Y}⚠ rate limited — waiting {wait}s{N}")
+                rate_waits += 1
+                time.sleep(wait)
+                r = bot.post("deleteMessage", data={
+                    "chat_id": chat_id, "message_id": str(mid),
+                }, ask_retry=False)
+                if r and r.get("ok"):
+                    ok += 1
+                    print(f"  {G}✔{N} {mid} (after wait)")
+                    time.sleep(delay)
+                    continue
+                desc = (r.get("description") if isinstance(r, dict) else "") or "no response"
+                dl   = desc.lower()
+
+            # "message to delete not found" / "message can't be deleted" = normal, just skip
+            if any(k in dl for k in (
+                    "not found", "message to delete",
+                    "can't be deleted", "message can't be deleted",
+                    "message_id_invalid")):
+                skipped += 1
+                print(f"  {Y}∅{N} {mid} (skipped — not found / undeletable)")
+            else:
+                fail += 1
+                failed_ids.append(mid)
+                print(f"  {R}✘{N} {mid} → {desc}")
+            time.sleep(delay)
+
+        print(f"\n{G}{'=' * 44}{N}")
+        print(f"{G}  DELETE SUMMARY{N}")
+        print(f"{G}{'=' * 44}{N}")
+        print(f"  Range       : {start_id}..{end_id}  ({total} msgs)")
+        print(f"  Deleted     : {ok}")
+        print(f"  Skipped     : {skipped}  (not found / undeletable)")
+        print(f"  Failed      : {fail}")
+        if rate_waits:
+            print(f"  Rate limits : {rate_waits} wait(s)")
+        if failed_ids:
+            head = ", ".join(str(x) for x in failed_ids[:30])
+            tail = " ..." if len(failed_ids) > 30 else ""
+            print(f"  Failed IDs  : {head}{tail}")
+        print(f"{G}{'=' * 44}{N}")
+        return
+
+    # ======================== SINGLE MODE ========================
     msg_id = input("message_id to delete: ").strip()
     if not msg_id:
         print(f"{R}message_id is required{N}")
         return
-    ans = input(f"Confirm delete message {msg_id} in {chat_id}? [y/N]: ").strip()
-    if ans.lower() != "y":
+    if input(f"Confirm delete message {msg_id} in {chat_id}? [y/N]: "
+             ).strip().lower() != "y":
         print(f"{Y}cancelled.{N}")
         return
-    data = {"chat_id": chat_id, "message_id": msg_id}
     print(f"\n{Y}>> deleteMessage ...{N}")
-    show_send_result(bot.post("deleteMessage", data=data))
+    r = bot.post("deleteMessage", data={"chat_id": chat_id, "message_id": msg_id})
+    if r and r.get("ok"):
+        print(f"{G}✔ Deleted message {msg_id}{N}")
+    else:
+        desc = (r.get("description") if isinstance(r, dict) else "") or "no response"
+        print(f"{R}✘ Failed to delete {msg_id}: {desc}{N}")
+        if isinstance(r, dict):
+            print(json.dumps(r, indent=2, ensure_ascii=False))
 
 
 # ================================================================
@@ -1561,10 +1806,18 @@ def silent_fetch(bot: TelegramBot):
     db_init(conn)
     offset = int(db_state_get(conn, 'offset', '0') or '0')
 
+    bot_id = bot.bot_id or 0
+    bot_username = ""
+    _me = bot.post("getMe", ask_retry=False)
+    if _me and _me.get("ok"):
+        bot_id = _me["result"].get("id") or bot_id
+        bot_username = _me["result"].get("username", "") or ""
+
     n_updates = 0
     n_messages = 0
     n_files = 0
     n_edits = 0
+    mention_hits: List[dict] = []
     started = time.time()
 
     try:
@@ -1621,6 +1874,21 @@ def silent_fetch(bot: TelegramBot):
                     n_files += len(descr.get('files') or [])
                     if descr.get('is_edit'):
                         n_edits += 1
+                    replied_to_bot = False
+                    if descr.get('reply_to_message_id'):
+                        try:
+                            replied_to_bot = _check_reply_to_bot(
+                                conn, descr['chat_id'], descr['message_id'], bot_id)
+                        except Exception:
+                            replied_to_bot = False
+                    if (bot_id and _check_mentioned(descr, bot_id, bot_username)) or replied_to_bot:
+                        mention_hits.append({
+                            'chat_id': descr['chat_id'],
+                            'chat_title': descr.get('chat_title') or str(descr['chat_id']),
+                            'message_id': descr['message_id'],
+                            'text': (descr.get('text') or descr.get('caption') or '')[:200],
+                            'replied': replied_to_bot,
+                        })
     except KeyboardInterrupt:
         print(f"\n{Y}⏹  Stopping...{N}")
 
@@ -1637,7 +1905,26 @@ def silent_fetch(bot: TelegramBot):
     print(f"  Files captured : {n_files}")
     print(f"  New offset     : {offset}")
     print(f"  Saved to       : {DB_FILE}")
+    print(f"  Mentions/replies to you: {len(mention_hits)}")
     print(f"{G}{'=' * 55}{N}")
+
+    if mention_hits:
+        print(f"\n{G}📢 You were mentioned or replied to in {len(mention_hits)} message(s).{N}")
+        for i, m in enumerate(mention_hits, 1):
+            tag = "REPLY" if m['replied'] else "MENTION"
+            print(f"  {i:>3}) [{tag}] {m['chat_title']}  #{m['message_id']}  "
+                  f"{(m['text'] or '').replace(chr(10), ' ')[:80]}")
+        if input("\nView and reply to these now? [y/N]: ").strip().lower() == "y":
+            for m in mention_hits:
+                _show_msg_full(conn, m['chat_id'], m['message_id'], show_raw=False)
+                rt = input("Reply text (empty = skip): ").strip()
+                if rt:
+                    r = bot.post("sendMessage", data={
+                        "chat_id": str(m['chat_id']),
+                        "text": rt,
+                        "reply_to_message_id": str(m['message_id']),
+                    }, ask_retry=False)
+                    print(f"{G}✔ Sent{N}" if r and r.get('ok') else f"{R}✘ Failed{N}")
     conn.close()
 
 def _fmt_ts(ts: Optional[int]) -> str:
@@ -1742,6 +2029,31 @@ def _show_reply_context(conn, chat_id: int, message_id: int,
             snippet = snippet[:200] + "…"
         print(f"    Text : {snippet}")
     return is_from_bot
+
+def _check_reply_to_bot(conn, chat_id: int, message_id: int,
+                        bot_id: Optional[int]) -> bool:
+    """Silent version of _show_reply_context — returns True if replied msg is the bot's."""
+    if not bot_id:
+        return False
+    row = conn.execute(
+        "SELECT raw_json FROM messages WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id)).fetchone()
+    if not row or not row[0]:
+        return False
+    try:
+        payload = json.loads(row[0])
+    except Exception:
+        return False
+    rtm = (payload.get("message") or {}).get("reply_to_message")
+    if not rtm:
+        return False
+    r_from = rtm.get("from") or {}
+    r_sender = rtm.get("sender_chat") or {}
+    if r_from.get("id") == bot_id:
+        return True
+    if r_sender.get("id") == bot_id:
+        return True
+    return False
 
 def _show_msg_full(conn, chat_id: int, message_id: int, show_raw: bool = False):
     row = conn.execute(
@@ -2017,82 +2329,6 @@ def chat_explorer(bot: TelegramBot):
 
     finally:
         conn.close()
-
-def reply_in_other_chat(bot: TelegramBot):
-    """Reply to a message that lives in another chat.
-       Since Telegram doesn't allow cross-chat replies directly,
-       we first copy the source message to the target chat and
-       then reply to that newly created copy."""
-    print(f"\n{B}--- Reply to a Message in Another Chat ---{N}")
-
-    # 1) source message (where the original message lives)
-    src_chat_id = input("source chat_id (original message chat): ").strip()
-    if not src_chat_id:
-        print(f"{R}source chat_id is required{N}")
-        return
-    src_msg_id = input("source message_id (message to reply to): ").strip()
-    if not src_msg_id:
-        print(f"{R}source message_id is required{N}")
-        return
-
-    # 2) target chat (where the reply should go)
-    dst_chat_id = input("target chat_id (where to send the reply): ").strip()
-    if not dst_chat_id:
-        print(f"{R}target chat_id is required{N}")
-        return
-
-    # 3) reply text
-    text = read_text_or_file("text")
-    if not text:
-        print(f"{R}text is empty{N}")
-        return
-
-    parse_mode = input("parse_mode [Markdown/HTML/MarkdownV2] (empty = none): ").strip() or None
-    ans = input("disable_notification? [y/N]: ").strip()
-    disable_notif = ans.lower() == "y"
-
-    # --- Case A: same chat — plain reply works natively ---
-    if str(src_chat_id) == str(dst_chat_id):
-        data = {
-            "chat_id": dst_chat_id,
-            "text": text,
-            "reply_to_message_id": src_msg_id,
-        }
-        if parse_mode:
-            data["parse_mode"] = parse_mode
-        if disable_notif:
-            data["disable_notification"] = "true"
-        print(f"\n{Y}>> sendMessage (same-chat reply) ...{N}")
-        show_send_result(bot.post("sendMessage", data=data))
-        return
-
-    # --- Case B: cross-chat — copy source msg first, then reply to the copy ---
-    print(f"\n{Y}>> copyMessage (source → target) ...{N}")
-    copy_resp = bot.post("copyMessage", data={
-        "chat_id": dst_chat_id,
-        "from_chat_id": src_chat_id,
-        "message_id": src_msg_id,
-    })
-    if not copy_resp or not copy_resp.get("ok"):
-        print(f"{R}✘ copyMessage failed — cannot reply cross-chat{N}")
-        show_info_result(copy_resp)
-        return
-    new_msg_id = copy_resp["result"]["message_id"]
-    print(f"{G}✔ Copied as new message_id={new_msg_id} in target chat{N}")
-
-    # now reply to the copied message
-    data = {
-        "chat_id": dst_chat_id,
-        "text": text,
-        "reply_to_message_id": str(new_msg_id),
-    }
-    if parse_mode:
-        data["parse_mode"] = parse_mode
-    if disable_notif:
-        data["disable_notification"] = "true"
-    print(f"\n{Y}>> sendMessage (reply to copy) ...{N}")
-    show_send_result(bot.post("sendMessage", data=data))
-
 
 def create_invite_link(bot: TelegramBot):
     print(f"\n{B}--- Create Chat Invite Link ---{N}")
@@ -2742,6 +2978,14 @@ def monitor_mode(bot: TelegramBot):
                 if descr is None:
                     continue
 
+                if get_guest_chat_mode():
+                    is_guest = bool(obj.get("business_connection_id") or
+                                    obj.get("sender_business_bot") or
+                                    obj.get("via_bot") or
+                                    obj.get("sender_boost_count"))
+                    if not is_guest:
+                        continue
+
                 # --- filter ---
                 if target_chat_id is not None and descr['chat_id'] != target_chat_id:
                     continue
@@ -2846,20 +3090,32 @@ def monitor_mode(bot: TelegramBot):
                         continue
 
                     if cmd == "r":
+                        qa = input("Quote a part of this message? [y/N]: ").strip().lower()
+                        quote = None
+                        if qa == "y":
+                            quote = input("quote text (exact substring): ")
+                            if not quote or not quote.strip():
+                                quote = None
+                                print(f"{Y}empty quote — sending without quote{N}")
                         rt = input("Reply text: ").strip()
                         if rt:
-                            r = bot.post("sendMessage", data={
-                                "chat_id": str(chat_id),
-                                "text": rt,
-                                "reply_to_message_id": str(descr['message_id']),
-                            })
+                            data = {"chat_id": str(chat_id), "text": rt}
+                            if quote:
+                                data["reply_parameters"] = json.dumps({
+                                    "message_id": int(descr['message_id']),
+                                    "quote": quote,
+                                })
+                            else:
+                                data["reply_to_message_id"] = str(descr['message_id'])
+                            r = bot.post("sendMessage", data=data)
                             ok = r and r.get("ok")
                             if ok:
-                                mid = r.get("result", {}).get("message_id", "?")
+                                mid = (r.get("result") or {}).get("message_id", "?")
                                 print(f"{G}✔ Reply sent (msg_id={mid}){N}")
                                 acted = True
                             else:
-                                print(f"{R}✘ Reply failed{N}")
+                                desc = (r.get("description") if isinstance(r, dict) else "?")
+                                print(f"{R}✘ Reply failed: {desc}{N}")
                         continue
 
                     if cmd == "l":
@@ -3108,6 +3364,243 @@ def chat_history_viewer(bot: TelegramBot):
     finally:
         conn.close()
 
+def toggle_guest_chat_mode():
+    cur = get_guest_chat_mode()
+    set_guest_chat_mode(not cur)
+    print(f"{G}✔ Guest chat mode → {'ON' if not cur else 'OFF'}{N}")
+
+def chat_id_lock_menu():
+    while True:
+        cur = get_locked_chat_id()
+        print(f"\n{B}--- Lock / Unlock chat_id ---{N}")
+        print(f"  Current: {cur or '(none)'}")
+        print("  1) Enter manually")
+        print("  2) Pick from DB")
+        print("  3) Clear lock")
+        print("  0) Back")
+        c = input("choice: ").strip()
+        if c == "1":
+            v = input("chat_id: ").strip()
+            if v:
+                set_locked_chat_id(v)
+                print(f"{G}✔ Locked to {v}{N}")
+        elif c == "2":
+            conn = sqlite3.connect(DB_FILE); db_init(conn)
+            cid = _pick_chat_for_monitor(conn)
+            conn.close()
+            if cid is not None:
+                set_locked_chat_id(str(cid))
+                print(f"{G}✔ Locked to {cid}{N}")
+        elif c == "3":
+            set_locked_chat_id("")
+            print(f"{G}✔ Lock cleared{N}")
+        elif c == "0":
+            return
+
+def db_purge_menu(bot: TelegramBot):
+    conn = sqlite3.connect(DB_FILE); db_init(conn)
+    try:
+        while True:
+            print(f"\n{B}--- Purge DB data ---{N}")
+            print("  1) Purge a specific chat (pick from list)")
+            print("  2) Purge by chat type (private/group/supergroup/channel)")
+            print("  3) Purge by date range (unix ts)")
+            print("  4) Purge by message_id range in a chat (pick from list)")
+            print("  5) Cleanup orphans (chat_users/entities with no messages)")
+            print("  0) Back")
+            c = input("choice: ").strip()
+            if c == "0":
+                return
+            where, params, label = None, [], ""
+            if c == "1":
+                cid = _pick_chat_required(conn)
+                if cid is None:
+                    continue
+                where, params, label = "chat_id = ?", [cid], f"chat {cid}"
+            elif c == "2":
+                k = input("kind (private/group/supergroup/channel): ").strip()
+                if not k:
+                    continue
+                ids = [r[0] for r in conn.execute(
+                    "SELECT id FROM entities WHERE kind = ?", (k,)).fetchall()]
+                if not ids:
+                    print(f"{Y}no chats of that kind{N}")
+                    continue
+                where = f"chat_id IN ({','.join('?' * len(ids))})"
+                params, label = ids, f"kind={k}"
+            elif c == "3":
+                a = input("from unix ts: ").strip()
+                b = input("to unix ts: ").strip()
+                try:
+                    where = "date >= ? AND date <= ?"
+                    params = [int(a), int(b)]
+                    label = f"date {a}..{b}"
+                except ValueError:
+                    continue
+            elif c == "4":
+                cid = _pick_chat_required(conn)
+                if cid is None:
+                    continue
+                a = input("from message_id: ").strip()
+                b = input("to message_id: ").strip()
+                try:
+                    where = "chat_id = ? AND message_id BETWEEN ? AND ?"
+                    params = [cid, int(a), int(b)]
+                    label = f"chat={cid} msg {a}..{b}"
+                except ValueError:
+                    continue
+            elif c == "5":
+                # orphan = chat with 0 messages (chat_users may still have stale rows)
+                orphans = conn.execute(
+                    """SELECT e.id, e.kind, e.title, e.first_name, e.last_name,
+                              (SELECT COUNT(*) FROM chat_users cu
+                                WHERE cu.chat_id = e.id) AS stale_members
+                         FROM entities e
+                        WHERE e.kind IN ('group','supergroup','channel','private')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM messages m WHERE m.chat_id = e.id
+                          )"""
+                ).fetchall()
+                if not orphans:
+                    print(f"{G}✔ No orphans found{N}")
+                    continue
+                print(f"\n{B}Orphan entities ({len(orphans)}) "
+                      f"— no messages, may have stale chat_users:{N}")
+                for eid, kind, title, fn, ln, stale in orphans:
+                    lbl = title or (fn and f"{fn} {ln or ''}".strip()) or "?"
+                    tag = f"  stale_members={stale}" if stale else ""
+                    print(f"  id={eid:<16} [{kind:<10}] {lbl}{tag}")
+                if input("Delete all orphans (entities + chat_users)? [y/N]: "
+                         ).strip().lower() != "y":
+                    continue
+                for eid, *_rest in orphans:
+                    conn.execute("DELETE FROM chat_users WHERE chat_id = ?", [eid])
+                    conn.execute("DELETE FROM entities WHERE id = ?", [eid])
+                conn.commit()
+                print(f"{G}✔ Removed {len(orphans)} orphan(s){N}")
+                continue
+            else:
+                continue
+            if not where:
+                continue
+            cnt = conn.execute(f"SELECT COUNT(*) FROM messages WHERE {where}",
+                               params).fetchone()[0]
+            if not cnt:
+                print(f"{Y}no rows matched{N}")
+                continue
+            if input(f"Delete {cnt} message(s) [{label}] + related rows? [y/N]: "
+                     ).strip().lower() != "y":
+                continue
+            conn.execute(f"DELETE FROM message_files WHERE {where}", params)
+            conn.execute(f"DELETE FROM message_edits WHERE {where}", params)
+            conn.execute(f"DELETE FROM message_reactions WHERE {where}", params)
+            conn.execute(f"DELETE FROM messages WHERE {where}", params)
+
+            # also drop ghost chat_users / entity rows for those chats
+            cids = [r[0] for r in conn.execute(
+                f"SELECT DISTINCT chat_id FROM messages WHERE {where}", params
+            ).fetchall()]
+            # above will be empty since we just deleted, so use params directly
+            if c == "1" or c == "4":
+                target_cid = params[0]
+                conn.execute("DELETE FROM chat_users WHERE chat_id = ?", [target_cid])
+                conn.execute(
+                    "DELETE FROM entities WHERE id = ? "
+                    "AND kind IN ('group','supergroup','channel','private')",
+                    [target_cid])
+            elif c == "2":
+                for cid in params:
+                    conn.execute("DELETE FROM chat_users WHERE chat_id = ?", [cid])
+                    conn.execute(
+                        "DELETE FROM entities WHERE id = ? "
+                        "AND kind IN ('group','supergroup','channel','private')",
+                        [cid])
+
+            conn.commit()
+            print(f"{G}✔ Purged {cnt} message(s) + related metadata{N}")
+    finally:
+        conn.close()
+
+def bot_management_mode(bot: TelegramBot):
+    conn = sqlite3.connect(DB_FILE); db_init(conn)
+    try:
+        # ثبت بات فعلی
+        me = bot.post("getMe", ask_retry=False)
+        if me and me.get("ok"):
+            info = me["result"]
+            now = db_utcnow()
+            conn.execute(
+                "INSERT OR REPLACE INTO managed_bots "
+                "(bot_id, username, first_name, token, added_at, last_seen_at, updated_at) "
+                "VALUES (?, ?, ?, ?, "
+                " COALESCE((SELECT added_at FROM managed_bots WHERE bot_id=?), ?), ?, ?)",
+                (info['id'], info.get('username'), info.get('first_name'), bot.token,
+                 info['id'], now, now, now))
+            conn.commit()
+
+        while True:
+            rows = conn.execute(
+                "SELECT bot_id, username, first_name, added_at, last_seen_at "
+                "FROM managed_bots ORDER BY last_seen_at DESC").fetchall()
+
+            print(f"\n{B}--- Bot Management ({len(rows)}) ---{N}")
+            if not rows:
+                print(f"{Y}No bots managed yet.{N}")
+            for i, (bid, un, fn, added, seen) in enumerate(rows, 1):
+                print(f"  {i:>3}) {fn or '?'} (@{un or '?'})  id={bid}  seen={seen}")
+            print("  0) Back")
+            c = input("choice (number to select, 0=back): ").strip()
+
+            if c == "0":
+                return
+            if not c.isdigit():
+                print(f"{R}invalid — type a number or 0{N}")
+                continue
+
+            idx = int(c) - 1
+            if idx < 0 or idx >= len(rows):
+                print(f"{R}invalid number{N}")
+                continue
+
+            # ===== زیرمنوی بات انتخاب‌شده =====
+            bid, un, fn, added, seen = rows[idx]
+            while True:
+                print(f"\n{B}--- Bot: {fn or '?'} (@{un or '?'}) id={bid} ---{N}")
+                print(f"  added: {added}   last_seen: {seen}")
+                print("  1) View stored token")
+                print("  2) View permissions for a chat")
+                print("  3) Delete this bot from DB")
+                print("  0) Back")
+                sub = input("choice: ").strip()
+
+                if sub == "0":
+                    break
+                elif sub == "1":
+                    tok = conn.execute(
+                        "SELECT token FROM managed_bots WHERE bot_id=?", (bid,)
+                    ).fetchone()
+                    val = tok[0] if tok and tok[0] else "(none)"
+                    print(f"  token: {val}")
+                elif sub == "2":
+                    perms = conn.execute(
+                        "SELECT chat_id, permissions_json FROM bot_permissions WHERE bot_id=?",
+                        (bid,)).fetchall()
+                    if not perms:
+                        print(f"{Y}no permissions stored{N}")
+                    for cid, pj in perms:
+                        print(f"  chat {cid}: {pj}")
+                elif sub == "3":
+                    if input(f"Delete bot {bid} + permissions? [y/N]: "
+                             ).strip().lower() == "y":
+                        conn.execute("DELETE FROM bot_permissions WHERE bot_id=?", (bid,))
+                        conn.execute("DELETE FROM managed_bots WHERE bot_id=?", (bid,))
+                        conn.commit()
+                        print(f"{G}✔ Deleted{N}")
+                        break
+                else:
+                    print(f"{R}invalid{N}")
+    finally:
+        conn.close()
 
 def manage_bot_token_menu(bot: TelegramBot):
     """Submenu for viewing, updating, and testing the bot token."""
@@ -3119,9 +3612,12 @@ def manage_bot_token_menu(bot: TelegramBot):
         print(f"\n{B}--- Manage Bot Token ---{N}")
         print(f"  Current Token : {masked}")
         print(f"  Connected Bot : {bot_user}")
+        cur_base = get_config_base_url() or "https://api.telegram.org"
+        print(f"  Base URL      : {cur_base}")
         print("  1) Show full token")
         print("  2) Change / update token (validates with Telegram API)")
         print("  3) Test token connectivity (getMe)")
+        print("  4) Set custom Base URL")
         print("  0) Back")
 
         c = input("choice: ").strip()
@@ -3160,6 +3656,13 @@ def manage_bot_token_menu(bot: TelegramBot):
             show_info_result(resp)
             if resp and resp.get("ok"):
                 bot.bot_info = resp["result"]
+        elif c == "4":
+            new_base = input(f"Base URL (empty = default api.telegram.org): ").strip()
+            set_config_base_url(new_base)
+            _root = (new_base or "https://api.telegram.org").rstrip("/")
+            bot.base_url = f"{_root}/bot{bot.token}"
+            bot.file_api = f"{_root}/file/bot{bot.token}"
+            print(f"{G}✔ Base URL set to {_root}{N}")
         elif c == "0":
             break
         else:
@@ -3263,11 +3766,417 @@ def format_menu_row(n1: int, t1: str, n2: Optional[int] = None, t2: Optional[str
 def print_menu_row(n1, t1, n2, t2):
     print(format_menu_row(n1, t1, n2, t2))
 
+import threading
+import http.server
+import urllib.parse
+
+_api_server_instance = {"httpd": None, "thread": None}
+
+def _start_api_server(bot: TelegramBot) -> bool:
+    cfg = load_config()
+    host = cfg.get("api_server_host", "127.0.0.1")
+    port = int(cfg.get("api_server_port", 8080))
+    api_token = (cfg.get("api_server_token") or bot.token).strip()
+
+    _proxy = PROXY or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _respond(self, code, body: bytes):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._handle()
+
+        def do_POST(self):
+            self._handle()
+
+        def _handle(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if not path.startswith(f"/bot{api_token}/"):
+                self._respond(404, b'{"ok":false,"description":"unknown token"}')
+                return
+            method = path.rsplit("/", 1)[-1]
+            qs = urllib.parse.parse_qs(parsed.query)
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            if self.headers.get("Content-Type", "").startswith("application/json"):
+                try:
+                    body_data = json.loads(raw) if raw else {}
+                except Exception:
+                    body_data = {}
+            else:
+                body_data = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "ignore")).items()}
+            params = {k: v[0] for k, v in qs.items()}
+            params.update(body_data)
+
+            sess = requests.Session()
+            if _proxy:
+                sess.proxies = {"http": _proxy, "https": _proxy}
+            try:
+                resp = sess.post(
+                    f"{bot.base_url}/{method}",
+                    data=params, timeout=60)
+                payload = resp.content
+                if method == "getUpdates":
+                    try:
+                        js = resp.json()
+                        if js.get("ok"):
+                            _conn = sqlite3.connect(DB_FILE); db_init(_conn)
+                            for upd in js.get("result", []):
+                                uid = upd.get("update_id", 0)
+                                kind, obj = None, None
+                                for k in ("message", "edited_message", "channel_post", "edited_channel_post"):
+                                    if k in upd:
+                                        kind, obj = k, upd[k]; break
+                                if obj is None:
+                                    db_store_update(_conn, uid, "non-message", upd); continue
+                                db_store_update(_conn, uid, kind, upd)
+                                db_process_message(_conn, uid, kind, obj)
+                            _conn.close()
+                    except Exception:
+                        pass
+                self._respond(resp.status_code, payload)
+            except Exception as e:
+                self._respond(502, json.dumps({"ok": False, "description": str(e)}).encode())
+
+        def log_message(self, *a, **k):
+            pass
+
+    try:
+        httpd = http.server.ThreadingHTTPServer((host, port), Handler)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        _api_server_instance["httpd"] = httpd
+        _api_server_instance["thread"] = t
+        print(f"{G}✔ API server listening on http://{host}:{port}/bot<token>/<method>{N}")
+        return True
+    except Exception as e:
+        print(f"{R}✘ Could not start API server: {e}{N}")
+        return False
+
+
+def _stop_api_server():
+    httpd = _api_server_instance.get("httpd")
+    if httpd:
+        httpd.shutdown()
+        _api_server_instance["httpd"] = None
+        _api_server_instance["thread"] = None
+        print(f"{G}✔ API server stopped{N}")
+    else:
+        print(f"{Y}Server not running{N}")
+
+
+def start_api_server_menu(bot: TelegramBot):
+    while True:
+        cfg = load_config()
+        running = _api_server_instance.get("httpd") is not None
+        print(f"\n{B}--- API Server ---{N}")
+        print(f"  Status : {'RUNNING' if running else 'stopped'}")
+        print(f"  Host   : {cfg.get('api_server_host')}")
+        print(f"  Port   : {cfg.get('api_server_port')}")
+        print(f"  Token  : {'(bot token)' if not cfg.get('api_server_token') else cfg.get('api_server_token')[:12] + '...'}")
+        print("  1) Start   2) Stop   3) Set host   4) Set port   5) Set token   0) Back")
+        c = input("choice: ").strip()
+        if c == "1":
+            if _start_api_server(bot):
+                cfg2 = load_config(); cfg2["api_server_enabled"] = True; save_config(cfg2)
+        elif c == "2":
+            _stop_api_server()
+            cfg2 = load_config(); cfg2["api_server_enabled"] = False; save_config(cfg2)
+        elif c == "3":
+            cfg2 = load_config(); cfg2["api_server_host"] = input("host: ").strip(); save_config(cfg2)
+        elif c == "4":
+            cfg2 = load_config()
+            try: cfg2["api_server_port"] = int(input("port: ").strip())
+            except ValueError: pass
+            save_config(cfg2)
+        elif c == "5":
+            cfg2 = load_config(); cfg2["api_server_token"] = input("token (empty=bot token): ").strip(); save_config(cfg2)
+        elif c == "0":
+            return
+
+# ================================================================
+#  Chat members (from DB) / Mentions / User info
+# ================================================================
+def _fetch_members(conn, chat_id: int) -> List[dict]:
+    rows = conn.execute(
+        """SELECT cu.user_id, cu.message_count, cu.last_seen_at,
+                  e.first_name, e.last_name, e.username, e.is_bot
+             FROM chat_users cu
+             LEFT JOIN entities e ON e.id = cu.user_id
+            WHERE cu.chat_id = ?
+            ORDER BY cu.last_seen_at DESC""",
+        (chat_id,)).fetchall()
+    out = []
+    for uid, cnt, seen, fn, ln, un, isb in rows:
+        name = " ".join(p for p in [fn, ln] if p).strip() or "?"
+        out.append({
+            'user_id': uid, 'message_count': cnt, 'last_seen': seen,
+            'first_name': fn, 'last_name': ln, 'username': un,
+            'is_bot': bool(isb), 'name': name,
+        })
+    return out
+
+def _pick_group_for_members(conn) -> Optional[int]:
+    """Like _pick_chat_for_monitor but only lists groups/supergroups."""
+    rows = conn.execute(
+        """SELECT e.id, e.kind, e.title, e.first_name, e.last_name, e.username,
+                  COUNT(DISTINCT cu.user_id) AS member_cnt,
+                  MAX(cu.last_seen_at) AS last_seen,
+                  (SELECT COUNT(*) FROM messages m WHERE m.chat_id = e.id) AS msg_cnt
+             FROM entities e
+             LEFT JOIN chat_users cu ON cu.chat_id = e.id
+            WHERE e.kind IN ('group', 'supergroup')
+            GROUP BY e.id
+            ORDER BY last_seen DESC""").fetchall()
+
+    print(f"\n{B}--- Groups / Supergroups in DB ---{N}")
+    if not rows:
+        print(f"{Y}No groups stored. Run Monitor / Silent fetch in a group first.{N}")
+        return None
+
+    for i, r in enumerate(rows, 1):
+        cid, kind, title, fn, ln, un, mem_cnt, _ls, msg_cnt = r
+        label = title or (fn and f"{fn} {ln or ''}".strip()) or str(cid)
+        uname = f" @{un}" if un else ""
+        ghost = f" {Y}⚠ ghost (use 54→5 to clean){N}" if msg_cnt == 0 else ""
+        print(f"  {i:>3}) {label:<28} [{kind:<10}] "
+              f"id={cid}  members={mem_cnt}  msgs={msg_cnt}{uname}{ghost}")
+
+    print("    0) Back")
+    sel = input("\nSelect group: ").strip()
+    if not sel or sel == "0":
+        return None
+    if sel.isdigit() and 1 <= int(sel) <= len(rows):
+        return rows[int(sel) - 1][0]
+    print(f"{R}invalid selection{N}")
+    return None
+
+def chat_members_menu(bot: TelegramBot):
+    conn = sqlite3.connect(DB_FILE); db_init(conn)
+    try:
+        target = _pick_group_for_members(conn)
+        if target is None:
+            return
+        while True:
+            members = _fetch_members(conn, target)
+            print(f"\n{B}--- Members of chat {target} ({len(members)}) ---{N}")
+            if not members:
+                print(f"{Y}No members recorded for this group yet.{N}")
+                print(f"{Y}Members are collected only from incoming messages — run{N}")
+                print(f"{Y}Monitor / Silent fetch while members are talking, then retry.{N}")
+            for i, m in enumerate(members, 1):
+                uname = f"@{m['username']}" if m['username'] else "-"
+                flag = " [bot]" if m['is_bot'] else ""
+                print(f"  {i:>3}) id={m['user_id']:<14} {m['name']:<25} "
+                      f"{uname:<20} msgs={m['message_count']:<5} "
+                      f"last={m['last_seen']}{flag}")
+            print("  d) Delete one   r) Reset all   e) Export JSON   0) Back")
+            c = input("choice: ").strip().lower()
+            if c == "0":
+                return
+            if c == "d":
+                idx = input("row # to delete: ").strip()
+                if idx.isdigit() and 1 <= int(idx) <= len(members):
+                    uid = members[int(idx) - 1]['user_id']
+                    if input(f"Remove user {uid} from chat {target}'s member list? "
+                             f"[y/N]: ").strip().lower() == "y":
+                        conn.execute("DELETE FROM chat_users WHERE chat_id=? AND user_id=?",
+                                     (target, uid))
+                        conn.commit()
+                        print(f"{G}✔ Removed{N}")
+            elif c == "r":
+                if input(f"Reset ALL member records for chat {target}? [y/N]: "
+                         ).strip().lower() == "y":
+                    n = conn.execute("SELECT COUNT(*) FROM chat_users WHERE chat_id=?",
+                                     (target,)).fetchone()[0]
+                    conn.execute("DELETE FROM chat_users WHERE chat_id=?", (target,))
+                    conn.commit()
+                    print(f"{G}✔ Removed {n} record(s){N}")
+            elif c == "e":
+                fname = f"members_{abs(target)}_{int(time.time())}.json"
+                out = [{"user_id": m['user_id'],
+                        "first_name": m['first_name'], "last_name": m['last_name'],
+                        "username": m['username'], "is_bot": m['is_bot'],
+                        "message_count": m['message_count'],
+                        "last_seen": m['last_seen']} for m in members]
+                with open(fname, "w", encoding="utf-8") as f:
+                    json.dump(out, f, indent=2, ensure_ascii=False)
+                print(f"{G}✔ Saved {len(out)} member(s) to {fname}{N}")
+    finally:
+        conn.close()
+
+
+def mention_members_menu(bot: TelegramBot):
+    conn = sqlite3.connect(DB_FILE); db_init(conn)
+    try:
+        target = _pick_group_for_members(conn)
+        if target is None:
+            return
+        members = _fetch_members(conn, target)
+        if not members:
+            print(f"{R}No members recorded. Run Monitor / Silent fetch first.{N}")
+            return
+
+        print(f"\n{B}--- Mention members of {target} ({len(members)} known) ---{N}")
+        print("  1) All members")
+        print("  2) From a list (ids/usernames, comma-separated, mixed OK)")
+        print("  0) Back")
+        c = input("choice: ").strip()
+        if c == "0":
+            return
+
+        if c == "1":
+            targets = members
+        elif c == "2":
+            raw = input("ids or @usernames (comma-separated): ").strip()
+            wanted_ids, wanted_unames = set(), set()
+            for tok in raw.split(","):
+                tok = tok.strip().lstrip("@")
+                if not tok:
+                    continue
+                if tok.lstrip('-').isdigit():
+                    wanted_ids.add(int(tok))
+                else:
+                    wanted_unames.add(tok.lower())
+            targets = [m for m in members
+                       if m['user_id'] in wanted_ids
+                       or (m['username'] and m['username'].lower() in wanted_unames)]
+            print(f"{G}Matched {len(targets)} of {len(members)} known member(s){N}")
+            if not targets:
+                return
+        else:
+            return
+
+        header = input("Header text (optional, empty = none): ").strip()
+        reply_to = input("Reply to message_id (empty = no reply): ").strip()
+        reply_chat = input("Reply-to chat_id (empty = same chat; for cross-chat): ").strip()
+        bs = input("Max mentions per message (default 30): ").strip()
+        try:
+            batch_size = int(bs) if bs else 30
+        except ValueError:
+            batch_size = 30
+
+        MAX_TEXT = 3800
+        batches: List[List[str]] = []
+        cur, cur_len = [], len(header) + 2 if header else 0
+        for m in targets:
+            uid = m['user_id']
+            label = f"@{m['username']}" if m['username'] else (m['name'] or str(uid))
+            frag = f'<a href="tg://user?id={uid}">{html.escape(label)}</a>'
+            if cur and (len(cur) >= batch_size or cur_len + len(frag) + 2 > MAX_TEXT):
+                batches.append(cur)
+                cur, cur_len = [], 0
+            cur.append(frag)
+            cur_len += len(frag) + 2
+        if cur:
+            batches.append(cur)
+
+        print(f"\n{G}Will send {len(targets)} mention(s) in {len(batches)} message(s).{N}")
+        if input("Confirm? [y/N]: ").strip().lower() != "y":
+            return
+
+        ok = fail = 0
+        for i, batch in enumerate(batches, 1):
+            text = " ".join(batch)
+            if header:
+                text = f"{html.escape(header)}\n\n{text}"
+            data = {"chat_id": str(target), "text": text, "parse_mode": "HTML"}
+            if reply_to:
+                if reply_chat:
+                    src_val = (int(reply_chat)
+                               if str(reply_chat).lstrip('-').isdigit()
+                               else reply_chat)
+                    try: msg_val = int(reply_to)
+                    except ValueError: msg_val = reply_to
+                    data["reply_parameters"] = json.dumps(
+                        {"message_id": msg_val, "chat_id": src_val})
+                else:
+                    data["reply_to_message_id"] = reply_to
+            r = bot.post("sendMessage", data=data, ask_retry=False)
+            if r and r.get("ok"):
+                ok += 1
+                mid = (r.get("result") or {}).get("message_id", "?")
+                print(f"  {G}✔{N} batch {i}/{len(batches)} sent (msg_id={mid})")
+                time.sleep(1)
+            else:
+                fail += 1
+                desc = (r.get("description") if isinstance(r, dict) else "no response")
+                print(f"  {R}✘{N} batch {i} failed: {desc}")
+
+        print(f"\n{G}{'=' * 46}{N}")
+        print(f"{G}  MENTION SUMMARY{N}")
+        print(f"{G}{'=' * 46}{N}")
+        print(f"  Members mentioned : {len(targets)}")
+        print(f"  Messages sent     : {ok}")
+        print(f"  Failed            : {fail}")
+        print(f"{G}{'=' * 46}{N}")
+    finally:
+        conn.close()
+
+
+def user_account_info(bot: TelegramBot):
+    print(f"\n{B}--- User Account Info ---{N}")
+    user_id = input("user_id (numeric): ").strip()
+    if not user_id.lstrip('-').isdigit():
+        print(f"{R}user_id must be numeric{N}")
+        return
+
+    # 1) profile photos
+    print(f"\n{Y}>> getUserProfilePhotos ...{N}")
+    r = bot.post("getUserProfilePhotos", data={"user_id": user_id, "limit": "1"})
+    if r and r.get("ok"):
+        photos = (r.get("result") or {}).get("photos") or []
+        if photos:
+            largest = max(photos[0], key=lambda p: p.get("file_size", 0))
+            print(f"{G}✔ Latest profile photo:{N}")
+            print(json.dumps(largest, indent=2, ensure_ascii=False))
+        else:
+            print(f"{Y}No profile photo set.{N}")
+    else:
+        desc = (r.get("description") if isinstance(r, dict) else "no response")
+        print(f"{Y}⚠ getUserProfilePhotos failed: {desc}{N}")
+
+    # 2) profile audios ("songs")
+    print(f"\n{Y}>> getUserProfileAudios ...{N}")
+    r = bot.post("getUserProfileAudios", data={"user_id": user_id, "limit": "10"})
+    if r and r.get("ok"):
+        audios = (r.get("result") or {}).get("audios") or []
+        if audios:
+            print(f"{G}✔ {len(audios)} profile audio(s):{N}")
+            for a in audios:
+                print(f"  🎵 {a.get('title', '?')} — {a.get('performer', '?')}")
+                print(f"     file_id : {a.get('file_id')}")
+                print(f"     duration: {a.get('duration', '?')}s")
+        else:
+            print(f"{Y}No profile audios.{N}")
+    else:
+        desc = (r.get("description") if isinstance(r, dict) else "no response")
+        print(f"{Y}⚠ getUserProfileAudios not available (needs Bot API 7.0+): {desc}{N}")
+
+    # 3) chat/account info (works if bot has ever chatted with them)
+    print(f"\n{Y}>> getChat ...{N}")
+    r = bot.post("getChat", data={"chat_id": user_id})
+    if r and r.get("ok"):
+        print(json.dumps(r["result"], indent=2, ensure_ascii=False))
+    else:
+        desc = (r.get("description") if isinstance(r, dict) else "no response")
+        print(f"{Y}⚠ getChat failed: {desc}{N}")
+        print(f"{Y}(bot must have an existing private chat with this user){N}")
 
 def main_menu(bot: TelegramBot):
     while True:
+        _lock = get_locked_chat_id() or "(none)"
+        _guest = "ON" if get_guest_chat_mode() else "OFF"
+        _api = "ON" if load_config().get("api_server_enabled") else "OFF"
         menu_lines = [
             f"\n{G}=============== Telegram Bot Sender ==============={N}",
+            f"  {Y}Locked chat_id:{N} {_lock}   {Y}Guest:{N} {_guest}   {Y}API:{N} {_api}",
             format_menu_row(1, "Text message", 2, "Photo"),
             format_menu_row(3, "Animation (GIF)", 4, "Video"),
             format_menu_row(5, "Document / File", 6, "Audio"),
@@ -3294,7 +4203,7 @@ def main_menu(bot: TelegramBot):
             f"{B}--- Files -----------------------------------------{N}",
             format_menu_row(37, "Download by id", 38, "Upload & get id"),
             f"{B}--- Monitor ---------------------------------------{N}",
-            format_menu_row(39, "Monitor mode", 40, "Reply other chat"),
+            "  39) Monitor mode",
             f"{B}--- Admin / Members -------------------------------{N}",
             format_menu_row(41, "Member info", 42, "Promote admin"),
             format_menu_row(43, "Demote admin", 44, "Set user title"),
@@ -3302,6 +4211,12 @@ def main_menu(bot: TelegramBot):
             f"{B}--- Data / DB -------------------------------------{N}",
             format_menu_row(46, "Silent fetch", 47, "Chat explorer"),
             "  48) History viewer",
+            f"{B}--- Advanced -------------------------------------{N}",
+            format_menu_row(52, "API Server", 53, "Bot management"),
+            format_menu_row(54, "Purge DB data", 55, "Lock/Unlock chat_id"),
+            "  56) Toggle guest chat mode",
+            format_menu_row(57, "Chat members (DB)", 58, "Mention members"),
+            "  59) User account info",
             "",
             "   0) Exit",
             ""
@@ -3349,7 +4264,6 @@ def main_menu(bot: TelegramBot):
             "37": lambda: download_file_by_id(bot),
             "38": lambda: upload_and_get_file_id(bot),
             "39": lambda: monitor_mode(bot),
-            "40": lambda: reply_in_other_chat(bot),
             "41": lambda: get_chat_member_info(bot),
             "42": lambda: promote_member(bot),
             "43": lambda: demote_member(bot),
@@ -3361,6 +4275,14 @@ def main_menu(bot: TelegramBot):
             "49": lambda: get_bot_profile(bot),
             "50": lambda: manage_bot_token_menu(bot),
             "51": lambda: manage_reactions_menu(),
+            "52": lambda: start_api_server_menu(bot),
+            "53": lambda: bot_management_mode(bot),
+            "54": lambda: db_purge_menu(bot),
+            "55": lambda: chat_id_lock_menu(),
+            "56": lambda: toggle_guest_chat_mode(),
+            "57": lambda: chat_members_menu(bot),
+            "58": lambda: mention_members_menu(bot),
+            "59": lambda: user_account_info(bot),
             "0":  lambda: None,
         }
 
@@ -3398,7 +4320,8 @@ def _read_caption_arg(inline_caption: Optional[str],
 def _cli_send_file(bot: TelegramBot, method: str, field: str,
                    chat_id: str, path: str, caption: str,
                    reply_to: Optional[int] = None,
-                   parse_mode: Optional[str] = None) -> int:
+                   parse_mode: Optional[str] = None,
+                   reply_to_chat: Optional[str] = None) -> int:
     """Generic file sender used by several CLI subcommands."""
     data = {"chat_id": chat_id}
     files = None
@@ -3408,7 +4331,13 @@ def _cli_send_file(bot: TelegramBot, method: str, field: str,
         data[field] = path  # file_id or URL
     if caption:
         data["caption"] = caption
-    if reply_to is not None:
+    if reply_to is not None and reply_to_chat:
+        src_val = int(reply_to_chat) if str(reply_to_chat).lstrip('-').isdigit() else reply_to_chat
+        data["reply_parameters"] = json.dumps({
+            "message_id": int(reply_to),
+            "chat_id": src_val,
+        })
+    elif reply_to is not None:
         data["reply_to_message_id"] = str(reply_to)
     if parse_mode:
         data["parse_mode"] = parse_mode
@@ -3509,6 +4438,10 @@ Examples:
                    help="message text (or use --text-file)")
     p.add_argument("--text-file", default=None, help="read text from file")
     p.add_argument("--reply-to", type=int, default=None)
+    p.add_argument("--reply-to-chat", default=None,
+                   help="source chat_id if replying cross-chat (e.g. -100... or @ch)")
+    p.add_argument("--quote", default=None,
+                   help="quote an exact substring of the replied-to message")
     p.add_argument("--parse-mode", default=None)
 
     for name in ("photo", "document", "video", "audio",
@@ -3574,6 +4507,8 @@ Examples:
     sp.add_argument("dst_chat_id")
     sp.add_argument("text", nargs="?", default=None)
     sp.add_argument("--text-file", default=None)
+    sp.add_argument("--quote", default=None,
+                    help="quote an exact substring of the source message")
     sp.add_argument("--parse-mode", default=None)
 
     sp = sub.add_parser("chat-action", help="send a chat action")
@@ -3673,7 +4608,15 @@ Examples:
                   file=sys.stderr)
             return 2
         data = {"chat_id": args.chat_id, "text": text}
-        if args.reply_to is not None:
+        if args.reply_to is not None and (args.reply_to_chat or args.quote):
+            rp: Dict[str, Any] = {"message_id": int(args.reply_to)}
+            if args.reply_to_chat:
+                src = args.reply_to_chat
+                rp["chat_id"] = int(src) if str(src).lstrip('-').isdigit() else src
+            if args.quote:
+                rp["quote"] = args.quote
+            data["reply_parameters"] = json.dumps(rp, ensure_ascii=False)
+        elif args.reply_to is not None:
             data["reply_to_message_id"] = str(args.reply_to)
         if args.parse_mode:
             data["parse_mode"] = args.parse_mode
@@ -3780,23 +4723,18 @@ Examples:
         if not text:
             print(f"{R}text is required{N}", file=sys.stderr)
             return 2
-        if str(args.src_chat_id) == str(args.dst_chat_id):
-            data = {"chat_id": args.dst_chat_id, "text": text,
-                    "reply_to_message_id": str(args.src_message_id)}
-            if args.parse_mode:
-                data["parse_mode"] = args.parse_mode
-            return _send_ok(bot.post("sendMessage", data=data, ask_retry=False))
-        copy_resp = bot.post("copyMessage", data={
-            "chat_id": args.dst_chat_id,
-            "from_chat_id": args.src_chat_id,
-            "message_id": args.src_message_id,
-        }, ask_retry=False)
-        if not copy_resp or not copy_resp.get("ok"):
-            show_info_result(copy_resp)
-            return 1
-        new_id = copy_resp["result"]["message_id"]
-        data = {"chat_id": args.dst_chat_id, "text": text,
-                "reply_to_message_id": str(new_id)}
+        data = {"chat_id": args.dst_chat_id, "text": text}
+        if str(args.src_chat_id) == str(args.dst_chat_id) and not args.quote:
+            data["reply_to_message_id"] = str(args.src_message_id)
+        else:
+            rp: Dict[str, Any] = {"message_id": int(args.src_message_id)}
+            if str(args.src_chat_id) != str(args.dst_chat_id):
+                rp["chat_id"] = (int(args.src_chat_id)
+                                 if str(args.src_chat_id).lstrip('-').isdigit()
+                                 else args.src_chat_id)
+            if args.quote:
+                rp["quote"] = args.quote
+            data["reply_parameters"] = json.dumps(rp, ensure_ascii=False)
         if args.parse_mode:
             data["parse_mode"] = args.parse_mode
         return _send_ok(bot.post("sendMessage", data=data, ask_retry=False))
@@ -4020,6 +4958,13 @@ def main():
     # --- bootstrap config & database ---
     config = load_config()
     ensure_db()
+    if not cli_mode and config.get("api_server_enabled"):
+        try:
+            _start_api_server(TelegramBot(config.get("token", ""),
+                                          config.get("proxy", ""),
+                                          config.get("base_url") or None))
+        except Exception as e:
+            print(f"{Y}⚠ Could not auto-start API server: {e}{N}")
 
     token = str(config.get("token", "")).strip()
     proxy_url = str(config.get("proxy", "")).strip()
@@ -4032,11 +4977,12 @@ def main():
         if not token:
             print(f"{R}ERROR: bot token is not configured in {CONFIG_FILE}. Run termgram interactively or edit {CONFIG_FILE}.{N}", file=sys.stderr)
             sys.exit(1)
-        bot = TelegramBot(token, proxy_url)
+        bot = TelegramBot(token, proxy_url, get_config_base_url() or None)
         sys.exit(run_cli(bot, sys.argv[1:]))
 
     # --- Interactive mode: ensure valid bot token ---
-    bot = TelegramBot(token, proxy_url)
+    base_url = get_config_base_url() or None
+    bot = TelegramBot(token, proxy_url, base_url)
     while True:
         if not token:
             print(f"\n{Y}⚠ No bot token found in {CONFIG_FILE}.{N}")
@@ -4045,7 +4991,7 @@ def main():
                 print(f"{Y}Exiting.{N}")
                 sys.exit(0)
             token = new_tok
-            bot = TelegramBot(token, proxy_url)
+            bot = TelegramBot(token, proxy_url, get_config_base_url() or None)
 
         print(f"\n{Y}Connecting to Telegram API...{N}")
         if proxy_url:
@@ -4085,22 +5031,28 @@ def main():
             print(f"\n  1) Retry connection")
             print(f"  2) Enter a new bot token")
             print(f"  3) Configure proxy")
-            print(f"  4) Continue anyway (offline)")
+            print(f"  4) Enter custom Base URL   ← (e.g. your own API proxy)")
+            print(f"  5) Continue anyway (offline)")
             print(f"  0) Exit")
-            ans = input("choice [1/2/3/4/0]: ").strip()
+            ans = input("choice [1/2/3/4/5/0]: ").strip()
             if ans == "1":
                 continue
             elif ans == "2":
                 new_tok = input("Enter bot token: ").strip()
                 if new_tok:
                     token = new_tok
-                    bot = TelegramBot(token, proxy_url)
+                    bot = TelegramBot(token, proxy_url, get_config_base_url() or None)
                 continue
             elif ans == "3":
                 configure_proxy_menu(bot)
                 proxy_url = PROXY
                 continue
             elif ans == "4":
+                new_base = input("Base URL (empty = api.telegram.org): ").strip()
+                set_config_base_url(new_base)
+                bot = TelegramBot(token, proxy_url, new_base or None)
+                continue
+            elif ans == "5":
                 break
             else:
                 print(f"{Y}Exiting.{N}")

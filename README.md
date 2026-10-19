@@ -1,8 +1,8 @@
 # termgram
 
-> A terminal client (TUI + CLI) for **Telegram bots** — send, manage, and monitor your bot directly from the command line.
+> A terminal client (TUI + CLI) for **Telegram bots** — send, manage, monitor, and bridge your bot directly from the command line.
 
-`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing. Since v1.1.0 it also ships with a **non-interactive CLI mode** for scripting and quick one-shot commands.
+`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing. Since v1.1.0 it also ships with a **non-interactive CLI mode** for scripting and quick one-shot commands, and since v1.2.0 with a built-in **API Server** that can act as a full proxy/bridge in front of the Telegram Bot API (persisting every `getUpdates` payload into `tg.db`).
 
 ---
 
@@ -12,10 +12,11 @@
 
 Text · Photo · Animation (GIF) · Video · Document · Audio · Voice · Video note · Sticker · Location · Contact · Poll · Dice · Reaction
 
-### 🖥 Two ways to drive it
+### 🖥 Three ways to drive it
 
 - **Interactive TUI** — numbered menu, prompt-driven, ideal for exploring the API by hand.
 - **CLI mode** — one-shot subcommands for scripting, cron jobs, or quick sends from the shell. Run `python3 termgram.py --help` to see every subcommand.
+- **API Server** — a built-in HTTP bridge (menu option **52**) that listens on `host:port` with its own token and proxies `/bot<token>/<method>` calls to the real Telegram Bot API. `getUpdates` payloads are persisted into `tg.db` **before** the response is returned. (Upstream calls still use HTTPS to Telegram.)
 
 ### 🔗 Inline URL buttons
 
@@ -31,6 +32,19 @@ Row 3 — number of buttons:            ← empty = finish
 ```
 
 > ⚠️ `sendVideoNote` does **not** support buttons (Telegram API limitation), so that one flow skips the prompt.
+
+### 💬 Quote-reply (reply_parameters)
+
+Reply to a **specific fragment** of an existing message using Telegram's `reply_parameters.quote`. Any send flow that goes through the common prompt now asks:
+
+```
+reply_to_message_id (empty = no reply): 12913
+  ↳ cross-chat reply (source msg in another chat)? [y/N]: n
+  ↳ quote a specific part of the message? [y/N]: y
+  ↳ quote text (must be an exact substring of the original): hello world
+```
+
+Works identically across TUI, monitor mode (`r` command), and CLI (`--quote "..."`). The quote **must be an exact substring** of the source message's text/caption, otherwise Telegram returns `QUOTE_TEXT_INVALID`.
 
 ### 💬 Custom reactions
 
@@ -55,24 +69,44 @@ Manage your bot token at any time using **menu option 50) Manage bot token**:
 - View the masked or full token.
 - Update the token with instant Telegram API verification (`getMe`).
 - Test connectivity and identity without leaving the client.
+- Set a **custom Base URL** (for use behind a self-hosted API proxy).
 
-On startup, `termgram` validates your token directly with Telegram's servers. If the token is invalid or missing, it alerts you immediately (confirming Telegram API's `401 Unauthorized` response) and prompts for a valid token or allows a clean exit.
+On startup, `termgram` validates your token directly with Telegram's servers. If the token is invalid or missing, it alerts you immediately (confirming Telegram API's `401 Unauthorized` response) and prompts for a valid token, a custom Base URL, or a clean exit.
+
+### 🌐 Custom Base URL
+
+If `api.telegram.org` is blocked (or you want to route traffic through your own bridge), set a custom root URL from **menu option 50 → 4**, from the startup error prompt, or directly in `config.json`:
+
+```json
+{ "base_url": "https://tg-bridge.example.com" }
+```
+
+`termgram` then calls `https://tg-bridge.example.com/bot<token>/<method>`. Leaving `base_url` empty restores the default Telegram endpoint.
 
 ### 🛡 Zero-crash bootstrapping
 
 Even if `termgram.py` is executed standalone in an empty directory, it automatically creates `config.json` and initializes `tg.db` SQLite schema without crashing or raising missing-file errors.
 
-### 🔀 Cross-chat reply
+### 🔀 Cross-chat reply — **native, no copy**
 
-Replying to a message that lives in **another chat** is supported natively. Since Telegram does **not** allow `reply_to_message_id` to cross chat boundaries, `termgram` handles this in two steps behind the scenes:
+Replying to a message that lives in **another chat** is now fully native. `termgram` uses Telegram's `reply_parameters` with an embedded `chat_id`:
 
-1. `copyMessage` copies the source message into the target chat (creating a new message there).
-2. `sendMessage` replies to that newly created copy.
+```json
+{
+  "reply_parameters": {
+    "message_id": 42,
+    "chat_id": -1001234567890,
+    "quote": "optional fragment"
+  }
+}
+```
 
-The end result: the target chat sees a copy of the original message with your reply attached underneath it. If source and target chats are the **same**, the copy step is skipped and a plain reply is used.
+No more `copyMessage` round-trip. The reply appears **directly under the original message**, even across chats — exactly as a normal Telegram client would render it. If the source and target chats are the same, `reply_to_message_id` is used for simplicity.
 
-- **TUI:** menu option **40) Reply other chat**
-- **CLI:** `python3 termgram.py reply <src_chat> <src_msg_id> <dst_chat> "<text>"`
+- **TUI:** every send flow (text, photo, dice, …) — the `reply_to_message_id` prompt now offers a cross-chat branch.
+- **CLI:** `--reply-to <id> --reply-to-chat <chat> [--quote "..."]`, or the dedicated `reply` subcommand.
+
+> ⚠️ Telegram only accepts cross-chat replies when the bot has access to the source message (member of the source chat, or the source message was authored by the bot or another bot with shared access). Otherwise you get `MESSAGE_TO_BE_REPLIED_NOT_FOUND`.
 
 ### 🤖 Bot profile
 
@@ -91,29 +125,142 @@ Set name · Set bio (description) · Set short bio · Set / remove profile photo
 - **TUI:** menu option **49) Get current profile**
 - **CLI:** `python3 termgram.py profile`
 
+### 👤 User account info
+
+Look up any user's public profile using **menu option 59**:
+
+- **`getUserProfilePhotos`** — latest profile photo + `file_id` of the largest size
+- **`getUserProfileAudios`** — the user's profile songs/audios (Bot API 7.0+)
+- **`getChat`** — general account info (works only if the bot has a private chat with the user)
+
+Minimal by design — just the essentials, nothing noisy.
+
 ### 🛠 Message management
 
-Edit · Delete · Pin · Unpin · Forward · Chat actions (typing / uploading)
+Edit · Delete (single **or** range) · Pin · Unpin · Forward · Chat actions (typing / uploading)
 
-### 👥 Chat & member management
+**Range delete** — pick a `chat_id` from DB (or type it) and specify `from → to` `message_id`. `termgram` sends a `deleteMessage` for every id, honors flood-control (`429 retry_after`), and reports a full summary:
 
-Leave chat · Get chat info · Member count · Member info · Ban · Unban · Promote / Demote admin · Set admin title · Set user tag · Set chat title / description · Create invite link
+```
+============================================
+  DELETE SUMMARY
+============================================
+  Range       : 12900..12920  (21 msgs)
+  Deleted     : 18
+  Skipped     : 2  (not found / undeletable)
+  Failed      : 1
+  Failed IDs  : 12915
+============================================
+```
 
-### 📁 Files
+### 💾 Local DB management
 
-Download any file by `file_id` · Upload a local file and get its `file_id`
+All received messages land in `tg.db`. To keep it lean, **menu option 54** offers:
+
+1. Purge a **specific chat** (picks from DB)
+2. Purge **by chat type** (private / group / supergroup / channel)
+3. Purge **by date range** (unix timestamps)
+4. Purge **by message_id range** inside a chat (picks from DB)
+5. **Cleanup orphans** — entities / `chat_users` rows with zero messages (leftovers from earlier purges)
+
+### 👥 Chat members (from DB)
+
+**Menu option 57** lists every known member of a group/supergroup, aggregated from incoming messages (`chat_users`):
+
+```
+--- Members of chat -1001234567890 (12) ---
+  1) id=8195921211    Sarina            @Sarina_girl_bot   msgs=42   last=2026-...
+  2) id=123456789     Ali Rezaei        @ali_reza          msgs=120  last=2026-...
+  d) Delete one   r) Reset all   e) Export JSON   0) Back
+```
+
+- `d` — remove one user from the DB member list (does **not** kick them from the real group)
+- `r` — reset the whole member list for that chat
+- `e` — export to `members_<chat>_<ts>.json`
+
+### 📣 Mention members in batches
+
+**Menu option 58** lets you @-mention members from the DB:
+
+- **All members** or **a custom list** (`123, @ali, 456` — ids and usernames mixed)
+- Split automatically into multiple messages by **batch size** (default 30) and **character limit** (3800)
+- Uses HTML `<a href="tg://user?id=...">` so it works **even for users without a username**
+- Optional header text, optional reply (works with **cross-chat** reply too)
+- Summary at the end: members mentioned / messages sent / failures
+
+### 🧭 Chat-ID lock
+
+**Menu option 55** pins a `chat_id` globally. Once locked:
+- Every prompt that would ask for `chat_id` (send, edit, delete, forward, pin, …) uses the locked value silently.
+- The current lock is shown at the top of the main menu: `Locked chat_id: -1001   Guest: OFF   API: OFF`
+- Lock manually, pick from DB, or clear.
+
+### 👻 Guest chat mode (Monitor)
+
+**Menu option 56** flips Monitor mode into a **guest-chat-only** filter. Only messages that arrive via business connections / guest bots (detected via `business_connection_id`, `sender_business_bot`, `via_bot`, `sender_boost_count`) are displayed; everything else is silently stored but not shown. Status appears in the menu header as `Guest: ON` / `Guest: OFF`.
+
+### 📡 Mention/reply detection in Silent Fetch
+
+When you finish a `Silent fetch` run, `termgram` now scans every stored message for:
+- **@-mentions of the bot** (via Telegram entities or raw `@username` text)
+- **Replies to the bot's own messages**
+
+At the end it reports:
+
+```
+=======================================================
+  FETCH SUMMARY
+=======================================================
+  Duration       : 00:02:15
+  Updates seen   : 340
+  Messages saved : 312
+  Edits detected : 3
+  Files captured : 8
+  New offset     : 12045
+  Saved to       : tg.db
+  Mentions/replies to you: 2
+=======================================================
+
+📢 You were mentioned or replied to in 2 message(s).
+  1) [MENTION] My Group  #12913  hey @YourBot can you check?
+  2) [REPLY]   My Group  #12920  ...
+
+View and reply to these now? [y/N]:
+```
+
+Choosing `y` opens each message and lets you reply inline — no need to jump back to Monitor.
+
+### 🤖 Bot management mode
+
+**Menu option 53** keeps a local registry of every bot you manage (from `getMe` + optional add-by-token):
+
+- List every managed bot with id, username, `added_at`, `last_seen_at`
+- View the stored token
+- View / inspect stored permissions per chat
+- Delete a bot's row (and its permission rows) from the DB
+
+### 🛰 API Server (bridge / proxy)
+
+**Menu option 52** starts a self-contained HTTP server that behaves like `api.telegram.org`:
+
+- Listens on `api_server_host:api_server_port` (default `127.0.0.1:8080`)
+- Accepts calls at `/bot<token>/<method>`
+- Uses `api_server_token` from `config.json`, or falls back to the active bot token
+- Forwards every request to the upstream Bot API (proxying via `PROXY` / `HTTPS_PROXY` if set)
+- **Persists every `getUpdates` response** into `tg.db` (messages, edits, files, reactions, entities) **before** returning it to the caller
+- Safe to leave running in the background; started automatically on launch if `api_server_enabled` is `true`
 
 ### 📡 Monitor & automation
 
-Monitor mode (live updates) · Auto-reply · Auto-react · Reply-to-other-chat
+Monitor mode (live updates) · Auto-reply · Auto-react · Reactions inline editing
 
 ### 💾 Local database (SQLite)
 
-Silent fetch · Chat explorer · History viewer — every received message is stored in `tg.db`
+Silent fetch · Chat explorer · History viewer · Purge / cleanup — every received message is stored in `tg.db`
 
 ### 🌐 Proxy support
 
-`socks5://` and `http://` — configured via `config.json` or interactively in **menu option 17) Configure proxy**.
+`socks5://` and `http://` — configured via `config.json`, interactively in **menu option 17**, **and** used automatically by the built-in API Server.
 
 ### 🧭 Zero-config TUI & smooth menu cascade
 
@@ -125,7 +272,7 @@ On interactive startup `termgram` prints a tidy banner:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.1.0                              ║
+║  📡 termgram  v1.2.0                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 ```
@@ -133,7 +280,7 @@ On interactive startup `termgram` prints a tidy banner:
 In **CLI mode** the banner is collapsed to a single short line, so it never pollutes shell output:
 
 ```
-termgram v1.1.0
+termgram v1.2.0
 ```
 
 ---
@@ -164,7 +311,7 @@ pip install -r requirements.txt
 
 ### Unified configuration (`config.json`)
 
-All configuration—bot token, proxy, and custom reactions—is stored in a single `config.json` file. You can create it from the provided template:
+All configuration—bot token, proxy, custom Base URL, API server settings, guest-mode flag, chat-ID lock, and custom reactions—is stored in a single `config.json` file. You can create it from the provided template:
 
 ```bash
 cp config.json.example config.json
@@ -178,23 +325,18 @@ Example `config.json`:
 {
   "token": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ",
   "proxy": "socks5://127.0.0.1:10808",
+  "base_url": "",
+  "api_server_enabled": false,
+  "api_server_host": "127.0.0.1",
+  "api_server_port": 8080,
+  "api_server_token": "",
+  "guest_chat_mode": false,
+  "locked_chat_id": "",
   "reactions": [
-    {
-      "emoji": "👍",
-      "label": "Thumbs Up"
-    },
-    {
-      "emoji": "👎",
-      "label": "Thumbs Down"
-    },
-    {
-      "emoji": "❤️",
-      "label": "Red Heart"
-    },
-    {
-      "emoji": "🔥",
-      "label": "Fire"
-    }
+    { "emoji": "👍", "label": "Thumbs Up" },
+    { "emoji": "👎", "label": "Thumbs Down" },
+    { "emoji": "❤️", "label": "Red Heart" },
+    { "emoji": "🔥", "label": "Fire" }
   ]
 }
 ```
@@ -202,6 +344,10 @@ Example `config.json`:
 1. **Bot token**: Get your token from [@BotFather](https://t.me/BotFather).
 2. **Proxy (optional)**: Supported schemes: `socks5://`, `http://`, `https://`. Set to `""` for direct connection.
 3. **Reactions**: Curated list of emoji reactions. Can be configured directly via **menu option 51) Manage reactions**.
+4. **`base_url`** (optional): custom root URL for the Bot API (default `https://api.telegram.org`).
+5. **`api_server_*`** (optional): enable the built-in bridge server, choose host/port, and optionally set a dedicated `api_server_token` (empty = reuse bot token). Menu option **52**.
+6. **`guest_chat_mode`** (optional): restrict Monitor to guest/business messages only. Menu option **56**.
+7. **`locked_chat_id`** (optional): pin a chat ID so every prompt that would otherwise ask for one uses this silently. Menu option **55**.
 
 > 💡 **Automatic upgrade & migration**: If upgrading from an older version, `termgram` automatically reads existing `token.txt`, `proxy.txt`, and `reactions.txt`, migrates their settings into `config.json`, and cleans up the legacy files.
 
@@ -219,7 +365,7 @@ You'll see:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.1.0                               ║
+║  📡 termgram  v1.2.0                               ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 Connecting to Telegram API...
@@ -227,11 +373,21 @@ Using proxy: socks5://127.0.0.1:10808
 ✔ Bot connected: @YourBot (My Bot)
 
 =============== Telegram Bot Sender ===============
+  Locked chat_id: (none)   Guest: OFF   API: OFF
    1) Text message              2) Photo
    3) Animation (GIF)           4) Video
    ...
   50) Manage bot token         51) Manage reactions
    ...
+--- Monitor ---------------------------------------
+  39) Monitor mode
+--- Advanced -------------------------------------
+  52) API Server               53) Bot management
+  54) Purge DB data            55) Lock/Unlock chat_id
+  56) Toggle guest chat mode
+  57) Chat members (DB)        58) Mention members
+  59) User account info
+
    0) Exit
 ```
 
@@ -244,7 +400,9 @@ choice: 1
 
 --- Common fields ---
 chat_id (number or @username): @my_channel
-reply_to_message_id (empty = no reply):
+reply_to_message_id (empty = no reply): 12913
+  ↳ cross-chat reply (source msg in another chat)? [y/N]: n
+  ↳ quote a specific part of the message? [y/N]: n
 parse_mode [Markdown/HTML/MarkdownV2] (empty = none):
 disable_notification? [y/N]: n
 protect_content? [y/N]: n
@@ -363,6 +521,14 @@ python3 termgram.py text -1001234567890 "Hello from the shell"
 python3 termgram.py text @mychannel "**bold** reply" \
     --parse-mode Markdown --reply-to 42
 
+# Text with quote-reply (quote must be an exact substring)
+python3 termgram.py text @mychannel "on it" \
+    --reply-to 42 --quote "please check this"
+
+# Cross-chat reply + quote in one shot
+python3 termgram.py text @mych2 "ok!" \
+    --reply-to 42 --reply-to-chat @mych1 --quote "please check this"
+
 # Text read from a file (multi-line safe)
 python3 termgram.py text -1001234567890 --text-file msg.txt
 
@@ -390,10 +556,14 @@ python3 termgram.py unpin  -1001234567890            # unpin all
 python3 termgram.py forward @src 42 @dst
 python3 termgram.py chat-action @mychannel typing
 
-# Cross-chat reply (copy + reply, handled automatically)
+# Cross-chat reply (native, uses reply_parameters)
 python3 termgram.py reply @news 100 -1001234567890 "this is important"
 
-# Same-chat reply (no copy, direct reply)
+# Cross-chat reply with a quote fragment
+python3 termgram.py reply @news 100 -1001234567890 "this is important" \
+    --quote "breaking news"
+
+# Same-chat reply (direct)
 python3 termgram.py reply -1001234567890 55 -1001234567890 "thanks!"
 
 # ── chat / members ────────────────────────────────────────
@@ -457,7 +627,7 @@ File-based subcommands (photo, document, video, audio, voice, animation) accept 
 In CLI mode the banner is intentionally tiny so it can be piped safely:
 
 ```
-termgram v1.0.1
+termgram v1.2.0
 ```
 
 No connectivity prompt, no "press any key" — a single-shot command runs, prints its result, and exits.
@@ -477,7 +647,7 @@ No connectivity prompt, no "press any key" — a single-shot command runs, print
 | `requirements.txt`    | Python dependencies                              | ✅              |
 | `README.md`           | This file                                        | ✅              |
 | `LICENSE`             | MIT license                                      | ✅              |
-| `config.json.example` | Configuration template (token, proxy, reactions) | ✅              |
+| `config.json.example` | Configuration template (token, proxy, base_url, API server, guest mode, lock, reactions) | ✅ |
 | `config.json`         | Your real configuration & secrets                | ❌ (gitignored) |
 | `tg.db`               | Local message database                           | ❌ (gitignored) |
 
