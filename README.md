@@ -1,9 +1,10 @@
 # termgram
 
-> A terminal client (TUI + CLI) for **Telegram bots** — send, manage, monitor, and bridge your bot directly from the command line.
+> A terminal client (TUI + CLI) and browser client for **Telegram bots** — send, manage, monitor, bridge, and even create managed bots directly from your terminal or browser.
 
-`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing. Since v1.1.0 it also ships with a **non-interactive CLI mode** for scripting and quick one-shot commands, and since v1.2.0 with a built-in **API Server** that can act as a full proxy/bridge in front of the Telegram Bot API (persisting every `getUpdates` payload into `tg.db`).
+`termgram` is a single-file, menu-driven TUI written in pure Python. It talks to the Telegram **Bot API** over HTTPS (via `requests`) and supports **SOCKS5 / HTTP proxies** out of the box (via `PySocks`). All received messages are stored locally in SQLite for later browsing. Since v1.1.0 it also ships with a **non-interactive CLI mode**; since v1.2.0 with a built-in **API Server** that can act as a full proxy/bridge in front of the Telegram Bot API; and since **v1.3.0** with a full **web UI** (browser client) and **Managed Bots** support (create and manage other bots via a shareable deeplink).
 
+> 🌐 **فارسی‌زبان هستید؟** نسخه‌ی کامل فارسی این راهنما در دسترس است: [README.fa.md](README.fa.md)
 ---
 
 ## ✨ Features
@@ -12,11 +13,12 @@
 
 Text · Photo · Animation (GIF) · Video · Document · Audio · Voice · Video note · Sticker · Location · Contact · Poll · Dice · Reaction
 
-### 🖥 Three ways to drive it
+### 🖥 Four ways to drive it
 
 - **Interactive TUI** — numbered menu, prompt-driven, ideal for exploring the API by hand.
 - **CLI mode** — one-shot subcommands for scripting, cron jobs, or quick sends from the shell. Run `python3 termgram.py --help` to see every subcommand.
-- **API Server** — a built-in HTTP bridge (menu option **52**) that listens on `host:port` with its own token and proxies `/bot<token>/<method>` calls to the real Telegram Bot API. `getUpdates` payloads are persisted into `tg.db` **before** the response is returned. (Upstream calls still use HTTPS to Telegram.)
+- **API Server** — a built-in HTTP bridge (menu option **52**) that listens on `host:port` with its own token and proxies `/bot<token>/<method>` calls to the real Telegram Bot API. `getUpdates` payloads are persisted into `tg.db` **before** the response is returned.
+- **Web UI** — a browser client with a login wall, chat list, message viewer, reactions, saved media (stickers/animations), member search, mention batching, file upload, and optional **background poller** that keeps `tg.db` fresh. Launch with `python3 termgram.py web` (see below).
 
 ### 🔗 Inline URL buttons
 
@@ -44,7 +46,28 @@ reply_to_message_id (empty = no reply): 12913
   ↳ quote text (must be an exact substring of the original): hello world
 ```
 
-Works identically across TUI, monitor mode (`r` command), and CLI (`--quote "..."`). The quote **must be an exact substring** of the source message's text/caption, otherwise Telegram returns `QUOTE_TEXT_INVALID`.
+Works identically across TUI, Monitor mode (`r` command), Web UI, and CLI (`--quote "..."`). The quote **must be an exact substring** of the source message's text/caption, otherwise Telegram returns `QUOTE_TEXT_INVALID`.
+
+### 🔀 Cross-chat reply — **native, no copy**
+
+Replying to a message that lives in **another chat** is fully native. `termgram` uses Telegram's `reply_parameters` with an embedded `chat_id`:
+
+```json
+{
+  "reply_parameters": {
+    "message_id": 42,
+    "chat_id": -1001234567890,
+    "quote": "optional fragment"
+  }
+}
+```
+
+No more `copyMessage` round-trip. The reply appears **directly under the original message**, even across chats. If the source and target chats are the same, `reply_to_message_id` is used for simplicity.
+
+- **TUI:** every send flow (text, photo, dice, …) — the `reply_to_message_id` prompt now offers a cross-chat branch.
+- **CLI:** `--reply-to <id> --reply-to-chat <chat> [--quote "..."]`, or the dedicated `reply` subcommand.
+
+> ⚠️ Telegram only accepts cross-chat replies when the bot has access to the source message (member of the source chat, or the source message was authored by the bot or another bot with shared access). Otherwise you get `MESSAGE_TO_BE_REPLIED_NOT_FOUND`.
 
 ### 💬 Custom reactions
 
@@ -62,6 +85,8 @@ Reactions are structured as clean JSON entries:
 - The `emoji` field is sent to Telegram.
 - The `label` is the display description shown in the picker.
 - Changes saved in `config.json` reload dynamically without restarting `termgram`.
+
+In the **Web UI**, reaction usage is tracked in the `reaction_usage` table so the most-used emojis appear first.
 
 ### 🔑 Bot token management & server verification
 
@@ -87,27 +112,6 @@ If `api.telegram.org` is blocked (or you want to route traffic through your own 
 
 Even if `termgram.py` is executed standalone in an empty directory, it automatically creates `config.json` and initializes `tg.db` SQLite schema without crashing or raising missing-file errors.
 
-### 🔀 Cross-chat reply — **native, no copy**
-
-Replying to a message that lives in **another chat** is now fully native. `termgram` uses Telegram's `reply_parameters` with an embedded `chat_id`:
-
-```json
-{
-  "reply_parameters": {
-    "message_id": 42,
-    "chat_id": -1001234567890,
-    "quote": "optional fragment"
-  }
-}
-```
-
-No more `copyMessage` round-trip. The reply appears **directly under the original message**, even across chats — exactly as a normal Telegram client would render it. If the source and target chats are the same, `reply_to_message_id` is used for simplicity.
-
-- **TUI:** every send flow (text, photo, dice, …) — the `reply_to_message_id` prompt now offers a cross-chat branch.
-- **CLI:** `--reply-to <id> --reply-to-chat <chat> [--quote "..."]`, or the dedicated `reply` subcommand.
-
-> ⚠️ Telegram only accepts cross-chat replies when the bot has access to the source message (member of the source chat, or the source message was authored by the bot or another bot with shared access). Otherwise you get `MESSAGE_TO_BE_REPLIED_NOT_FOUND`.
-
 ### 🤖 Bot profile
 
 Read your bot's current identity and profile in one shot:
@@ -124,6 +128,8 @@ Set name · Set bio (description) · Set short bio · Set / remove profile photo
 
 - **TUI:** menu option **49) Get current profile**
 - **CLI:** `python3 termgram.py profile`
+
+The **set profile photo** flow (menu option 35) supports **static** (JPG/PNG, recommended 512×512) and **animated** (MP4) profile photos via `setMyProfilePhoto`.
 
 ### 👤 User account info
 
@@ -161,7 +167,7 @@ All received messages land in `tg.db`. To keep it lean, **menu option 54** offer
 2. Purge **by chat type** (private / group / supergroup / channel)
 3. Purge **by date range** (unix timestamps)
 4. Purge **by message_id range** inside a chat (picks from DB)
-5. **Cleanup orphans** — entities / `chat_users` rows with zero messages (leftovers from earlier purges)
+5. **Cleanup orphans** — entities / `chat_users` rows with zero messages
 
 ### 👥 Chat members (from DB)
 
@@ -187,6 +193,8 @@ All received messages land in `tg.db`. To keep it lean, **menu option 54** offer
 - Uses HTML `<a href="tg://user?id=...">` so it works **even for users without a username**
 - Optional header text, optional reply (works with **cross-chat** reply too)
 - Summary at the end: members mentioned / messages sent / failures
+
+The **Web UI** exposes the same batching via `POST /api/chats/<id>/mention` with `{text, all, user_ids, batch_size, reply_to}`.
 
 ### 🧭 Chat-ID lock
 
@@ -220,24 +228,63 @@ At the end it reports:
   Saved to       : tg.db
   Mentions/replies to you: 2
 =======================================================
-
-📢 You were mentioned or replied to in 2 message(s).
-  1) [MENTION] My Group  #12913  hey @YourBot can you check?
-  2) [REPLY]   My Group  #12920  ...
-
-View and reply to these now? [y/N]:
 ```
 
 Choosing `y` opens each message and lets you reply inline — no need to jump back to Monitor.
 
-### 🤖 Bot management mode
+The **Web UI** stores these in `mention_flags` and shows an **Unseen mentions** badge in the sidebar.
 
-**Menu option 53** keeps a local registry of every bot you manage (from `getMe` + optional add-by-token):
+### 🤖 Bot management mode (local registry)
+
+**Menu option 53** keeps a local registry of every bot you manage:
 
 - List every managed bot with id, username, `added_at`, `last_seen_at`
 - View the stored token
 - View / inspect stored permissions per chat
 - Delete a bot's row (and its permission rows) from the DB
+- **Add new bot** — generates a shareable deeplink (see Managed Bots below)
+
+### 🆕 Managed Bots (Bot API 9.6+)
+
+Since v1.3.0, `termgram` supports Telegram's **Managed Bots** feature. A bot with the `can_manage_bots` flag (enabled via **Bot Management Mode** in `@BotFather`) can create and manage other bots on behalf of users — **without ever opening `@BotFather`**.
+
+**How it works**
+
+1. **Menu option 60) Managed bot link** — or **menu 53 → a** — generates a shareable link:
+   ```
+   https://t.me/newbot/<manager_bot_username>/<suggested_username>?name=<suggested_display_name>
+   ```
+   The link is built **locally** (no API call) using `urllib.parse.quote`.
+
+2. Send this link to a user. They open it in the Telegram app, confirm, and a new bot is created under your manager bot.
+
+3. Telegram sends your manager bot an **`updateManagedBot`** update. `termgram` processes it in **all four update loops** (Silent fetch, Monitor, Web UI poller, API Server) and automatically:
+   - Prints the new bot's id, username, name, and owner
+   - Calls `getManagedBotToken` to fetch the token
+   - Stores the new bot in `managed_bots`
+
+4. Manage it from **menu 53 → pick bot**:
+   - **`getManagedBotToken`** — fetch/refresh the token
+   - **`replaceManagedBotToken`** — rotate the token (old one is invalidated)
+   - **`bots.getAccessSettings`** / **`bots.editAccessSettings`** — view or change the bot's permission set
+   - **`bots.exportBotToken`** — MTProto-level token export
+
+**Supported API methods**
+
+| Method | Purpose |
+|---|---|
+| `bots.checkUsername` | Validate a proposed username |
+| `bots.createBot` | (via deeplink only — see below) |
+| `getManagedBotToken` | Fetch the token |
+| `replaceManagedBotToken` | Rotate the token |
+| `bots.getAccessSettings` | Read the access set |
+| `bots.editAccessSettings` | Update the access set |
+| `bots.exportBotToken` | MTProto token export |
+| `updateManagedBot` | Update type received on creation / change |
+
+> 💡 **Note:** `bots.createBot` is an MTProto method and is **never** called directly by `termgram`. Bot creation always happens **client-side** when the user opens the deeplink in their Telegram app. `termgram` only generates the link and reacts to the resulting `updateManagedBot` — exactly as Telegram intends.
+
+> ⚠️ **Prerequisite:** Enable **Bot Management Mode** in `@BotFather` for your manager bot. Otherwise `getMe` returns `can_manage_bots: false` and all Managed Bot calls fail.
 
 ### 🛰 API Server (bridge / proxy)
 
@@ -250,6 +297,65 @@ Choosing `y` opens each message and lets you reply inline — no need to jump ba
 - **Persists every `getUpdates` response** into `tg.db` (messages, edits, files, reactions, entities) **before** returning it to the caller
 - Safe to leave running in the background; started automatically on launch if `api_server_enabled` is `true`
 
+### 🌐 Web UI (browser client)
+
+Since **v1.3.0**, `termgram` ships with a full browser client under `web-ui/`. Launch it with:
+
+```bash
+python3 termgram.py web \
+    --host 127.0.0.1 \
+    --port 8081 \
+    --password "your-secret" \
+    --session-ttl 86400 \
+    --cache-max-mb 512
+```
+
+Then open `http://127.0.0.1:8081/` and log in.
+
+**What you get**
+
+- **Sidebar** — every chat in `tg.db`, with unread mention badges
+- **Message viewer** — bubbles, reply preview, forwarded-from, sender admin badge, reactions inline
+- **Send** — text, reactions, forward, upload (photo/video/document/audio/voice/animation/sticker/video_note)
+- **Mentions** — batch mention members using the same HTML `tg://user` logic as menu 58
+- **Saved media** — save/star/send stickers and animations (`saved_media` table)
+- **Chat info** — live `getChat` + member count + admin list (cached in `chat_admins`)
+- **Member search** — cached `chat_users` with message counts
+- **Reactions** — sorted by usage (`reaction_usage`), sent through `setMessageReaction`
+- **Avatars** — cached on disk under `cache/avatars/` and `cache/chat_avatars/`
+- **File cache** — downloaded files under `cache/files/` with disk cap (`--cache-max-mb`)
+- **Poller (optional)** — a **Sync & auto-refresh** toggle starts a background thread that calls `getUpdates` and writes to `tg.db`, so the UI stays live. Disable with `--no-poller`.
+
+**Security**
+
+- All state-changing endpoints (`POST`) require a `X-CSRF-Token` header matching the session's CSRF token.
+- Login is rate-limited (5 attempts/minute/IP).
+- Session cookies are `HttpOnly; SameSite=Strict`.
+- Pass `--https-cert` and `--https-key` to enable HTTPS; binding to `0.0.0.0` without HTTPS triggers a confirmation prompt.
+
+**Routes (for the curious)**
+
+```
+POST /api/login            GET  /api/me
+POST /api/logout           GET  /api/chats
+GET  /api/chats/:id/messages
+POST /api/chats/:id/send
+POST /api/chats/:id/forward
+POST /api/chats/:id/upload
+POST /api/chats/:id/mention
+POST /api/chats/:id/messages/:mid/react
+GET  /api/chats/:id/info      GET  /api/chats/:id/members
+GET  /api/chats/:id/admins    GET  /api/chats/:id/mentions
+GET  /api/users/:id/profile   GET  /api/users/:id/photo
+GET  /api/chats/:id/photo     GET  /api/reactions
+GET  /api/media/saved         POST /api/media/saved
+POST /api/media/saved/:id/send
+POST /api/media/saved/:id/favorite
+GET  /api/mentions/unseen
+POST /api/poller/start        POST /api/poller/stop
+GET  /api/files/:unique_id    (cached, immutable)
+```
+
 ### 📡 Monitor & automation
 
 Monitor mode (live updates) · Auto-reply · Auto-react · Reactions inline editing
@@ -258,9 +364,11 @@ Monitor mode (live updates) · Auto-reply · Auto-react · Reactions inline edit
 
 Silent fetch · Chat explorer · History viewer · Purge / cleanup — every received message is stored in `tg.db`
 
+The schema includes tables for `messages`, `message_files`, `message_edits`, `message_reactions`, `entities`, `chat_users`, `chat_admins`, `chat_photos`, `user_photos`, `mention_flags`, `saved_media`, `reaction_usage`, `file_cache`, `web_sessions`, `managed_bots`, `bot_permissions`, and `state`.
+
 ### 🌐 Proxy support
 
-`socks5://` and `http://` — configured via `config.json`, interactively in **menu option 17**, **and** used automatically by the built-in API Server.
+`socks5://` and `http://` — configured via `config.json`, interactively in **menu option 17**, **and** used automatically by the built-in API Server and Web UI file downloads.
 
 ### 🧭 Zero-config TUI & smooth menu cascade
 
@@ -272,7 +380,7 @@ On interactive startup `termgram` prints a tidy banner:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.2.0                              ║
+║  📡 termgram  v1.3.0                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 ```
@@ -280,16 +388,19 @@ On interactive startup `termgram` prints a tidy banner:
 In **CLI mode** the banner is collapsed to a single short line, so it never pollutes shell output:
 
 ```
-termgram v1.2.0
+termgram v1.3.0
 ```
 
 ---
 
 ## 📋 Requirements
 
-- **Python 3.10+** (tested on 3.14.7)
+- **Python 3.10+** (tested on 3.14.x)
 - `requests`
 - `PySocks`
+
+Optional (for HTTPS on the web UI):
+- `ssl` — built into CPython; just supply `--https-cert` and `--https-key`
 
 ---
 
@@ -341,7 +452,7 @@ Example `config.json`:
 }
 ```
 
-1. **Bot token**: Get your token from [@BotFather](https://t.me/BotFather).
+1. **Bot token**: Get your token from [@BotFather](https://t.me/BotFather). For **Managed Bots**, enable **Bot Management Mode** in `@BotFather`.
 2. **Proxy (optional)**: Supported schemes: `socks5://`, `http://`, `https://`. Set to `""` for direct connection.
 3. **Reactions**: Curated list of emoji reactions. Can be configured directly via **menu option 51) Manage reactions**.
 4. **`base_url`** (optional): custom root URL for the Bot API (default `https://api.telegram.org`).
@@ -365,11 +476,10 @@ You'll see:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.2.0                               ║
+║  📡 termgram  v1.3.0                               ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 Connecting to Telegram API...
-Using proxy: socks5://127.0.0.1:10808
 ✔ Bot connected: @YourBot (My Bot)
 
 =============== Telegram Bot Sender ===============
@@ -377,16 +487,22 @@ Using proxy: socks5://127.0.0.1:10808
    1) Text message              2) Photo
    3) Animation (GIF)           4) Video
    ...
+  49) Get current profile
   50) Manage bot token         51) Manage reactions
-   ...
+--- Chat Management -------------------------------
+  19) Leave chat               20) Get chat info
+  ...
 --- Monitor ---------------------------------------
   39) Monitor mode
+--- Data / DB -------------------------------------
+  46) Silent fetch             47) Chat explorer
+  48) History viewer
 --- Advanced -------------------------------------
   52) API Server               53) Bot management
   54) Purge DB data            55) Lock/Unlock chat_id
   56) Toggle guest chat mode
   57) Chat members (DB)        58) Mention members
-  59) User account info
+  59) User account info        60) Managed bot link
 
    0) Exit
 ```
@@ -426,6 +542,23 @@ text: Hello from termgram!
 ✔ Sent successfully
 📨 message_id: 1234
 ```
+
+#### Example: creating a managed bot
+
+```
+choice: 60
+
+--- Create Managed Bot Invite Link ---
+Suggested username for new bot (e.g. MyCoolBot): MyShopBot
+Suggested display name (optional): My Shop Assistant
+
+✔ Link generated:
+  https://t.me/newbot/MyManagerBot/MyShopBot?name=My%20Shop%20Assistant
+
+Share this link with users so they can create a bot managed by you.
+```
+
+When a user opens that link and confirms, your manager bot receives `updateManagedBot`, and `termgram` prints the new bot's info plus its token automatically.
 
 ---
 
@@ -491,6 +624,9 @@ Files:
   download    download a file by file_id
   upload      upload a file and print its file_id
 
+Web UI:
+  web         start the browser client (see examples)
+
 Examples:
   termgram text 123456 "Hello"
   termgram text 123456 --text-file msg.txt --parse-mode Markdown
@@ -500,6 +636,7 @@ Examples:
   termgram ban 123456 987654321 --revoke
   termgram download AgACAgQAAxkBAA... --out file.bin
   termgram upload 123456 ./img.png --as photo
+  termgram web --host 127.0.0.1 --port 8081 --password "secret"
 ```
 
 Each subcommand also has its own `--help`:
@@ -508,41 +645,25 @@ Each subcommand also has its own `--help`:
 python3 termgram.py photo --help
 python3 termgram.py ban --help
 python3 termgram.py reply --help
+python3 termgram.py web --help
 ```
 
 #### CLI examples
 
 ```bash
 # ── sending ────────────────────────────────────────────────
-# Plain text
 python3 termgram.py text -1001234567890 "Hello from the shell"
-
-# Text with Markdown + reply-to
 python3 termgram.py text @mychannel "**bold** reply" \
     --parse-mode Markdown --reply-to 42
-
-# Text with quote-reply (quote must be an exact substring)
 python3 termgram.py text @mychannel "on it" \
     --reply-to 42 --quote "please check this"
-
-# Cross-chat reply + quote in one shot
 python3 termgram.py text @mych2 "ok!" \
     --reply-to 42 --reply-to-chat @mych1 --quote "please check this"
-
-# Text read from a file (multi-line safe)
 python3 termgram.py text -1001234567890 --text-file msg.txt
-
-# Photo with inline caption
 python3 termgram.py photo -1001234567890 ./pic.jpg --caption "look at this"
-
-# Document, reading caption from a file
 python3 termgram.py document @mychannel ./archive.zip --caption-file cap.txt
-
-# Video with caption + reply-to
 python3 termgram.py video -1001234567890 ./clip.mp4 \
     --caption "🎬" --reply-to 900
-
-# Location, contact, dice
 python3 termgram.py location -1001234567890 35.6892 51.3890
 python3 termgram.py contact  -1001234567890 "+15551234567" "John" --last-name "Doe"
 python3 termgram.py dice     -1001234567890 🎲
@@ -555,16 +676,7 @@ python3 termgram.py pin    -1001234567890 99
 python3 termgram.py unpin  -1001234567890            # unpin all
 python3 termgram.py forward @src 42 @dst
 python3 termgram.py chat-action @mychannel typing
-
-# Cross-chat reply (native, uses reply_parameters)
 python3 termgram.py reply @news 100 -1001234567890 "this is important"
-
-# Cross-chat reply with a quote fragment
-python3 termgram.py reply @news 100 -1001234567890 "this is important" \
-    --quote "breaking news"
-
-# Same-chat reply (direct)
-python3 termgram.py reply -1001234567890 55 -1001234567890 "thanks!"
 
 # ── chat / members ────────────────────────────────────────
 python3 termgram.py chat-info    @mychannel
@@ -591,6 +703,21 @@ python3 termgram.py remove-photo
 # ── files ─────────────────────────────────────────────────
 python3 termgram.py download AgACAgQAAxkBAA... --out pic.jpg
 python3 termgram.py upload -1001234567890 ./img.png --as photo
+
+# ── web UI ────────────────────────────────────────────────
+# local-only, HTTP, password = bot token
+python3 termgram.py web
+
+# custom port + explicit password
+python3 termgram.py web --host 0.0.0.0 --port 9090 --password "s3cr3t"
+
+# HTTPS with your own certificate (recommended for public hosts)
+python3 termgram.py web --host 0.0.0.0 --port 443 \
+    --https-cert ./cert.pem --https-key ./key.pem \
+    --password "s3cr3t"
+
+# localhost only, poller disabled (if you run Monitor elsewhere)
+python3 termgram.py web --no-poller
 ```
 
 ##### Text & caption sources
@@ -627,17 +754,41 @@ File-based subcommands (photo, document, video, audio, voice, animation) accept 
 In CLI mode the banner is intentionally tiny so it can be piped safely:
 
 ```
-termgram v1.2.0
+termgram v1.3.0
 ```
 
 No connectivity prompt, no "press any key" — a single-shot command runs, prints its result, and exits.
 
 ---
 
+### Web UI (browser client)
+
+Start the server:
+
+```bash
+python3 termgram.py web --host 127.0.0.1 --port 8081 --password "your-secret"
+```
+
+Then open **http://127.0.0.1:8081/** and log in.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--host` | `127.0.0.1` | Bind address (`0.0.0.0` for LAN — requires confirmation) |
+| `--port` | `8081` | TCP port |
+| `--password` | bot token | Login password — **always set a separate secret for public hosts** |
+| `--session-ttl` | `86400` | Session lifetime in seconds |
+| `--cache-max-mb` | `512` | Max disk cache for downloaded files |
+| `--https-cert` / `--https-key` | — | PEM certificate + private key to enable HTTPS |
+| `--no-poller` | off | Don't start the background `getUpdates` poller |
+
+The **web UI requires the `web-ui/` directory** (containing `index.html`, `app.js`, `style.css`, `favicon.svg`) to be present next to `termgram.py`. If you cloned the repo, they're already there.
+
+---
+
 ## 🖥 Platform notes
 
 - ✅ **Linux / macOS**: fully supported.
-- ⚠️ **Windows**: Persian/Farsi characters may not render correctly in the default terminal. Use **Windows Terminal** with a font that supports RTL (e.g. *Cascadia Code*, *Vazirmatn*) or run inside **WSL**.
+- ⚠️ **Windows**: Persian/Farsi characters may not render correctly in the default terminal. Use **Windows Terminal** with a font that supports RTL (e.g. *Cascadia Code*, *Vazirmatn*) or run inside **WSL**. The web UI is unaffected and works in any browser.
 
 ---
 
@@ -647,9 +798,12 @@ No connectivity prompt, no "press any key" — a single-shot command runs, print
 | `requirements.txt`    | Python dependencies                              | ✅              |
 | `README.md`           | This file                                        | ✅              |
 | `LICENSE`             | MIT license                                      | ✅              |
-| `config.json.example` | Configuration template (token, proxy, base_url, API server, guest mode, lock, reactions) | ✅ |
+| `config.json.example` | Configuration template                           | ✅              |
+| `web-ui/`             | Browser client (`index.html` + `static/`)        | ✅              |
 | `config.json`         | Your real configuration & secrets                | ❌ (gitignored) |
 | `tg.db`               | Local message database                           | ❌ (gitignored) |
+| `cache/`              | File/avatar/media cache for the web UI           | ❌ (gitignored) |
+| `get_updates_py.sh`   | Legacy shell script (superseded by Silent fetch) | ❌              |
 
 ---
 

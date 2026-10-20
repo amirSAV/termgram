@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <title>termgram</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Login -->
+  <div id="login-view" hidden>
+    <form id="login-form">
+      <h1>📡 termgram</h1>
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- App -->
+  <button id="mobile-back-btn" class="mobile-back-btn" type="button"
+          aria-label="Back to chat list" title="Back">←</button>
+  <div id="app-view" hidden>
+    <button id="toggle-sidebar" class="mobile-only">☰</button>
+        <aside id="sidebar">
+      <header>
+        <span id="bot-name">…</span>
+        <button id="logout-btn" title="Logout">⎋</button>
+      </header>
+      <ul id="chat-list"></ul>
+      <footer class="sidebar-footer">
+        <label>
+          <input type="checkbox" id="auto-fetch">
+          Auto-fetch new messages
+        </label>
+      </footer>
+    </aside>
+    <main id="main">
+      <header id="chat-header">Select a chat</header>
+      <div id="message-list"></div>
+      <div id="reply-banner" hidden>
+        <span id="reply-banner-text"></span>
+        <button id="cancel-reply" title="Cancel reply">✕</button>
+      </div>
+      <div id="composer" hidden>
+        <input type="file" id="file-input" hidden multiple>
+        <button type="button" id="media-btn" title="Saved stickers & GIFs">🎨</button>
+        <button type="button" id="upload-btn" title="Attach file">📎</button>
+        <select id="upload-kind" title="Send as: auto">
+          <option value="auto" title="auto">⚙</option>
+          <option value="photo" title="photo">🖼</option>
+          <option value="video" title="video">🎬</option>
+          <option value="document" title="document">📄</option>
+          <option value="audio" title="audio">🎵</option>
+          <option value="voice" title="voice">🎤</option>
+          <option value="animation" title="animation">🎞</option>
+          <option value="sticker" title="sticker">🎨</option>
+          <option value="video_note" title="video_note">📹</option>
+        </select>
+        <textarea id="message-input" placeholder="Message…" rows="1"></textarea>
+        <button type="button" id="send-btn">Send</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- right-click context menu -->
+  <div id="ctx-menu" class="ctx-menu" hidden></div>
+  <div id="react-picker" class="react-picker" hidden></div>
+  <div id="media-panel" class="media-panel" hidden>
+    <div class="media-tabs">
+      <button data-mtab="sticker" class="active">Stickers</button>
+      <button data-mtab="animation">GIFs</button>
+      <button data-mtab="favorites">⭐</button>
+      <button class="media-close" id="media-close">✕</button>
+    </div>
+    <div class="media-grid" id="media-grid"></div>
+    <div class="media-empty" id="media-empty">Nothing saved yet. Right-click a sticker or GIF and select "⭐ Save to media".</div>
+  </div>
+  <div id="lightbox" class="lightbox" hidden>
+    <div class="lightbox-inner" id="lightbox-inner"></div>
+    <button class="lightbox-close" id="lightbox-close" title="Close">✕</button>
+    <div class="lightbox-hint">scroll to zoom · drag to pan · click outside to close</div>
+  </div>
+
+  <!-- generic modal -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-content" id="modal-body"></div>
+  </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

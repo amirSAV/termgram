@@ -15,6 +15,9 @@ import time
 import sqlite3
 import random
 import html
+import hmac
+import re
+import secrets
 from datetime import datetime, timezone
 import argparse
 from typing import Optional, Dict, Any, List, Tuple
@@ -40,9 +43,17 @@ except ImportError:
     print("     (or manually: pip install requests PySocks)\n")
     sys.exit(1)
 
+# --- Readline enhancements (in-memory only, no history file) ---
+try:
+    import readline
+    readline.parse_and_bind("tab: complete")
+    readline.set_history_length(1000)
+except ImportError:
+    pass
+
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
@@ -342,6 +353,44 @@ class TelegramBot:
             self.bot_id = resp["result"]["id"]
             return self.bot_id
         return None
+        # ---------- Managed Bots ----------
+    def check_managed_bot_username(self, username: str) -> Optional[dict]:
+        """Check whether a username is available for a new bot."""
+        return self.post("bots.checkUsername", data={"username": username})
+
+    def create_managed_bot(self, user_id: int, username: str, name: str,
+                           via_deeplink: bool = False) -> Optional[dict]:
+        """Create a new bot managed by this manager bot."""
+        data = {
+            "user_id": user_id,
+            "username": username,
+            "name": name,
+        }
+        if via_deeplink:
+            data["via_deeplink"] = "true"
+        return self.post("bots.createBot", data=data)
+
+    def get_managed_bot_token(self, user_id: int) -> Optional[dict]:
+        """Get the full token of a managed bot."""
+        return self.post("getManagedBotToken", data={"user_id": user_id})
+
+    def replace_managed_bot_token(self, user_id: int) -> Optional[dict]:
+        """Generate a new token for a managed bot (old token is invalidated)."""
+        return self.post("replaceManagedBotToken", data={"user_id": user_id})
+
+    def get_managed_bot_access_settings(self, user_id: int) -> Optional[dict]:
+        """Get the access settings of a managed bot."""
+        return self.post("bots.getAccessSettings", data={"user_id": user_id})
+
+    def edit_managed_bot_access_settings(self, user_id: int, **settings) -> Optional[dict]:
+        """Edit the access settings of a managed bot."""
+        data = {"user_id": user_id}
+        data.update(settings)
+        return self.post("bots.editAccessSettings", data=data)
+
+    def export_managed_bot_token(self, user_id: int) -> Optional[dict]:
+        """Export a managed bot token via MTProto (if supported)."""
+        return self.post("bots.exportBotToken", data={"user_id": user_id})
 
 
 # ================================================================
@@ -494,6 +543,95 @@ def db_init(conn: sqlite3.Connection) -> None:
         permissions_json TEXT,
         PRIMARY KEY (bot_id, chat_id)
     );
+
+    CREATE TABLE IF NOT EXISTS web_sessions (
+        token       TEXT PRIMARY KEY,
+        csrf_token  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        ip          TEXT,
+        user_agent  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_web_sessions_exp ON web_sessions(expires_at);
+
+    CREATE TABLE IF NOT EXISTS file_cache (
+        file_unique_id    TEXT PRIMARY KEY,
+        file_id           TEXT,
+        file_path         TEXT,
+        file_size         INTEGER,
+        downloaded_at     TEXT NOT NULL,
+        last_accessed_at  TEXT NOT NULL,
+        access_count      INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_cache_accessed
+        ON file_cache(last_accessed_at);
+
+    CREATE TABLE IF NOT EXISTS user_photos (
+        user_id        INTEGER PRIMARY KEY,
+        file_unique_id TEXT,
+        file_id        TEXT,
+        file_path      TEXT,
+        file_size      INTEGER,
+        fetched_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS reaction_usage (
+        emoji        TEXT PRIMARY KEY,
+        count        INTEGER DEFAULT 0,
+        last_used_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_admins (
+        chat_id       INTEGER NOT NULL,
+        user_id       INTEGER NOT NULL,
+        status        TEXT,
+        custom_title  TEXT,
+        is_anonymous  INTEGER DEFAULT 0,
+        updated_at    TEXT NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_photos (
+        chat_id        INTEGER PRIMARY KEY,
+        file_unique_id TEXT,
+        file_id        TEXT,
+        file_path      TEXT,
+        file_size      INTEGER,
+        fetched_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS mention_flags (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id       INTEGER NOT NULL,
+        message_id    INTEGER NOT NULL,
+        kind          TEXT NOT NULL,
+        from_user_id  INTEGER,
+        created_at    TEXT NOT NULL,
+        seen          INTEGER DEFAULT 0,
+        UNIQUE (chat_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mention_flags_chat_seen
+        ON mention_flags(chat_id, seen);
+
+    CREATE TABLE IF NOT EXISTS saved_media (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_type         TEXT NOT NULL,
+        file_id            TEXT NOT NULL,
+        file_unique_id     TEXT NOT NULL UNIQUE,
+        thumbnail_file_id  TEXT,
+        emoji              TEXT,
+        set_name           TEXT,
+        file_name          TEXT,
+        saved_at           TEXT NOT NULL,
+        is_favorite        INTEGER DEFAULT 0,
+        use_count          INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_saved_media_type
+        ON saved_media(media_type);
+    CREATE INDEX IF NOT EXISTS idx_saved_media_fav
+        ON saved_media(is_favorite);
     """)
     conn.commit()
 
@@ -884,7 +1022,7 @@ def read_common(allow_buttons: bool = True) -> Optional[dict]:
     return {
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
-        "reply_parameters": reply_params,   # ← جدید
+        "reply_parameters": reply_params,   # new field
         "parse_mode": parse_mode,
         "disable_notification": disable_notif,
         "protect_content": protect,
@@ -942,17 +1080,32 @@ def show_send_result(result: Optional[dict]):
         return
     if result.get("ok"):
         res = result.get("result")
-        if isinstance(res, dict):
+        if isinstance(res, dict) and "message_id" in res:
+            _persist_from_resp(result)
             msg_id = res.get("message_id")
-            if msg_id:
-                print(f"{G}✔ Success{N}")
-                print(f"{G}📨 message_id: {msg_id}{N}")
-                return
+            print(f"{G}✔ Success{N}")
+            print(f"{G}📨 message_id: {msg_id}{N}")
+            return
         print(f"{G}✔ Success{N}")
     else:
         print(f"{R}✘ Failed:{N}")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
+def _persist_from_resp(resp: Optional[dict], update_kind: str = "message"):
+    """If resp contains a Message object, store it in the DB.
+       Safe to call on any API response — silently ignores non-message results."""
+    if not resp or not resp.get("ok"):
+        return
+    result = resp.get("result")
+    if not isinstance(result, dict) or "message_id" not in result:
+        return
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        db_init(conn)
+        db_process_message(conn, 0, update_kind, result)
+        conn.close()
+    except Exception as e:
+        print(f"{Y}⚠ Could not persist sent message: {e}{N}")
 
 def show_info_result(result: Optional[dict]):
     if not result:
@@ -1827,7 +1980,7 @@ def silent_fetch(bot: TelegramBot):
                 params={"offset": offset, "limit": 100, "timeout": 30,
                              "allowed_updates": ["message", "edited_message", "channel_post",
                                                  "edited_channel_post", "message_reaction",
-                                                 "message_reaction_count"]},
+                                                 "message_reaction_count", "managed_bot"]},
                 ask_retry=False,
             )
             if not resp or not resp.get("ok"):
@@ -1856,7 +2009,8 @@ def silent_fetch(bot: TelegramBot):
                 kind = None
                 obj = None
                 for k in ("message", "edited_message",
-                          "channel_post", "edited_channel_post"):
+                          "channel_post", "edited_channel_post",
+                          "managed_bot"):
                     if k in upd:
                         kind, obj = k, upd[k]
                         break
@@ -1866,8 +2020,37 @@ def silent_fetch(bot: TelegramBot):
                     db_state_set(conn, 'offset', offset)
                     continue
 
+                if kind == "managed_bot":
+                    mb = obj
+                    db_store_update(conn, uid, "managed_bot", upd)
+                    db_state_set(conn, 'offset', offset)
+                    print(f"\n{G}📢 New managed bot created!{N}")
+                    print(f"  Bot ID   : {mb.get('bot_id')}")
+                    print(f"  Username : @{mb.get('username')}")
+                    print(f"  Name     : {mb.get('name')}")
+                    print(f"  Owner ID : {mb.get('user_id')}")
+                    tok_resp = bot.get_managed_bot_token(mb.get('user_id'))
+                    if tok_resp and tok_resp.get("ok"):
+                        new_token = tok_resp.get("result")
+                        print(f"{G}✔ Token received: {new_token}{N}")
+                        try:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO managed_bots "
+                                "(bot_id, username, first_name, token, added_at, "
+                                " last_seen_at, updated_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
+                                 new_token, db_utcnow(), db_utcnow(), db_utcnow()))
+                            conn.commit()
+                        except Exception as e:
+                            print(f"{Y}⚠ Could not save to managed_bots: {e}{N}")
+                    else:
+                        print(f"{R}✘ Could not fetch token{N}")
+                    continue
+
                 db_store_update(conn, uid, kind, upd)
                 descr = db_process_message(conn, uid, kind, obj)
+                _record_mention_if_needed(conn, descr, bot)
                 db_state_set(conn, 'offset', offset)
                 if descr:
                     n_messages += 1
@@ -2818,6 +3001,7 @@ def _handle_reaction_update(conn, mr: dict) -> dict:
          json.dumps(new, ensure_ascii=False),
          changed, now))
     conn.commit()
+    _apply_reaction_delta(conn, chat_id, msg_id, old, new)
     return {
         "chat_id": chat_id,
         "chat_title": chat.get("title") or chat.get("first_name") or str(chat_id),
@@ -2913,7 +3097,7 @@ def monitor_mode(bot: TelegramBot):
                 params={"offset": offset, "limit": 100, "timeout": 30,
                              "allowed_updates": ["message", "edited_message", "channel_post",
                                                  "edited_channel_post", "message_reaction",
-                                                 "message_reaction_count"]},
+                                                 "message_reaction_count", "managed_bot"]},
                 ask_retry=False,
             )
             if not resp or not resp.get("ok"):
@@ -2962,7 +3146,8 @@ def monitor_mode(bot: TelegramBot):
                 kind = None
                 obj = None
                 for k in ("message", "edited_message",
-                          "channel_post", "edited_channel_post"):
+                          "channel_post", "edited_channel_post",
+                          "managed_bot"):
                     if k in upd:
                         kind, obj = k, upd[k]
                         break
@@ -2972,8 +3157,37 @@ def monitor_mode(bot: TelegramBot):
                     db_state_set(conn, 'offset', offset)
                     continue
 
+                if kind == "managed_bot":
+                    mb = obj
+                    db_store_update(conn, uid, "managed_bot", upd)
+                    db_state_set(conn, 'offset', offset)
+                    print(f"\n{G}📢 New managed bot created!{N}")
+                    print(f"  Bot ID   : {mb.get('bot_id')}")
+                    print(f"  Username : @{mb.get('username')}")
+                    print(f"  Name     : {mb.get('name')}")
+                    print(f"  Owner ID : {mb.get('user_id')}")
+                    tok_resp = bot.get_managed_bot_token(mb.get('user_id'))
+                    if tok_resp and tok_resp.get("ok"):
+                        new_token = tok_resp.get("result")
+                        print(f"{G}✔ Token received: {new_token}{N}")
+                        try:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO managed_bots "
+                                "(bot_id, username, first_name, token, added_at, "
+                                " last_seen_at, updated_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
+                                 new_token, db_utcnow(), db_utcnow(), db_utcnow()))
+                            conn.commit()
+                        except Exception as e:
+                            print(f"{Y}⚠ Could not save to managed_bots: {e}{N}")
+                    else:
+                        print(f"{R}✘ Could not fetch token{N}")
+                    continue
+
                 db_store_update(conn, uid, kind, upd)
                 descr = db_process_message(conn, uid, kind, obj)
+                _record_mention_if_needed(conn, descr, bot)
                 db_state_set(conn, 'offset', offset)
                 if descr is None:
                     continue
@@ -3035,11 +3249,12 @@ def monitor_mode(bot: TelegramBot):
 
                 # --- auto actions ---
                 if auto_reply and auto_reply_text and text:
-                    bot.post("sendMessage", data={
+                    _r = bot.post("sendMessage", data={
                         "chat_id": str(chat_id),
                         "text": auto_reply_text,
                         "reply_to_message_id": str(descr['message_id']),
                     })
+                    _persist_from_resp(_r)
                     print(f"{G}  [auto-reply] sent{N}")
                 if auto_react and text:
                     reaction_json = json.dumps(
@@ -3110,6 +3325,7 @@ def monitor_mode(bot: TelegramBot):
                             r = bot.post("sendMessage", data=data)
                             ok = r and r.get("ok")
                             if ok:
+                                _persist_from_resp(r)
                                 mid = (r.get("result") or {}).get("message_id", "?")
                                 print(f"{G}✔ Reply sent (msg_id={mid}){N}")
                                 acted = True
@@ -3522,9 +3738,10 @@ def db_purge_menu(bot: TelegramBot):
         conn.close()
 
 def bot_management_mode(bot: TelegramBot):
-    conn = sqlite3.connect(DB_FILE); db_init(conn)
+    conn = sqlite3.connect(DB_FILE)
+    db_init(conn)
     try:
-        # ثبت بات فعلی
+        # Register the current bot in the registry
         me = bot.post("getMe", ask_retry=False)
         if me and me.get("ok"):
             info = me["result"]
@@ -3549,12 +3766,37 @@ def bot_management_mode(bot: TelegramBot):
             for i, (bid, un, fn, added, seen) in enumerate(rows, 1):
                 print(f"  {i:>3}) {fn or '?'} (@{un or '?'})  id={bid}  seen={seen}")
             print("  0) Back")
-            c = input("choice (number to select, 0=back): ").strip()
+            print("  a) Add new bot (via link)")
+            c = input("choice: ").strip()
 
             if c == "0":
                 return
+
+            if c.lower() == "a":
+                # --- Generate invite link for creating a new managed bot ---
+                print(f"\n{B}--- Create Managed Bot Link ---{N}")
+                suggested = input("Suggested username for new bot (e.g. MyCoolBot): ").strip()
+                if not suggested:
+                    print(f"{R}Username is required.{N}")
+                    continue
+                suggested_name = input("Suggested display name (optional): ").strip() or suggested
+                manager_username = bot.bot_info.get('username') if bot.bot_info else ''
+                if not manager_username:
+                    me = bot.post("getMe", ask_retry=False)
+                    if me and me.get("ok"):
+                        manager_username = me['result'].get('username', '')
+                        bot.bot_info = me['result']
+                if not manager_username:
+                    print(f"{R}Could not determine manager bot username.{N}")
+                    continue
+                link = f"https://t.me/newbot/{manager_username}/{suggested}?name={urllib.parse.quote(suggested_name)}"
+                print(f"\n{G}✔ Link generated:{N}")
+                print(f"  {link}")
+                print(f"\n{Y}Share this link with users so they can create a bot managed by you.{N}")
+                continue
+
             if not c.isdigit():
-                print(f"{R}invalid — type a number or 0{N}")
+                print(f"{R}invalid — type a number, 'a', or 0{N}")
                 continue
 
             idx = int(c) - 1
@@ -3562,14 +3804,19 @@ def bot_management_mode(bot: TelegramBot):
                 print(f"{R}invalid number{N}")
                 continue
 
-            # ===== زیرمنوی بات انتخاب‌شده =====
             bid, un, fn, added, seen = rows[idx]
+
+            # ===== Submenu for the selected bot =====
             while True:
                 print(f"\n{B}--- Bot: {fn or '?'} (@{un or '?'}) id={bid} ---{N}")
                 print(f"  added: {added}   last_seen: {seen}")
                 print("  1) View stored token")
                 print("  2) View permissions for a chat")
                 print("  3) Delete this bot from DB")
+                print("  4) Get/Refresh managed bot token (getManagedBotToken)")
+                print("  5) Replace managed bot token (replaceManagedBotToken)")
+                print("  6) View/Edit access settings")
+                print("  7) Export token via MTProto (bots.exportBotToken)")
                 print("  0) Back")
                 sub = input("choice: ").strip()
 
@@ -3597,6 +3844,52 @@ def bot_management_mode(bot: TelegramBot):
                         conn.commit()
                         print(f"{G}✔ Deleted{N}")
                         break
+                elif sub == "4":
+                    print(f"\n{Y}>> getManagedBotToken ...{N}")
+                    resp = bot.get_managed_bot_token(bid)
+                    show_info_result(resp)
+                    if resp and resp.get("ok"):
+                        new_token = resp["result"]
+                        conn.execute(
+                            "UPDATE managed_bots SET token = ?, updated_at = ? WHERE bot_id = ?",
+                            (new_token, db_utcnow(), bid))
+                        conn.commit()
+                        print(f"{G}✔ Token updated in local DB{N}")
+                elif sub == "5":
+                    ans = input(f"Replace token for bot {bid}? Old token will be invalidated. [y/N]: ").strip().lower()
+                    if ans == "y":
+                        print(f"\n{Y}>> replaceManagedBotToken ...{N}")
+                        resp = bot.replace_managed_bot_token(bid)
+                        show_info_result(resp)
+                        if resp and resp.get("ok"):
+                            new_token = resp["result"]
+                            conn.execute(
+                                "UPDATE managed_bots SET token = ?, updated_at = ? WHERE bot_id = ?",
+                                (new_token, db_utcnow(), bid))
+                            conn.commit()
+                            print(f"{G}✔ Token replaced and saved{N}")
+                elif sub == "6":
+                    print(f"\n{Y}>> bots.getAccessSettings ...{N}")
+                    resp = bot.get_managed_bot_access_settings(bid)
+                    show_info_result(resp)
+                    if resp and resp.get("ok"):
+                        print(f"\n{B}Edit settings? (leave blank to skip){N}")
+                        settings = {}
+                        for key in ("can_send_messages", "can_send_media", "can_add_web_page_previews",
+                                    "can_send_polls", "can_change_info", "can_invite_users",
+                                    "can_pin_messages", "can_manage_topics"):
+                            val = input(f"  {key} [y/N/blank]: ").strip().lower()
+                            if val == "y":
+                                settings[key] = True
+                            elif val == "n":
+                                settings[key] = False
+                        if settings:
+                            edit_resp = bot.edit_managed_bot_access_settings(bid, **settings)
+                            show_info_result(edit_resp)
+                elif sub == "7":
+                    print(f"\n{Y}>> bots.exportBotToken ...{N}")
+                    resp = bot.export_managed_bot_token(bid)
+                    show_info_result(resp)
                 else:
                     print(f"{R}invalid{N}")
     finally:
@@ -3830,11 +4123,35 @@ def _start_api_server(bot: TelegramBot) -> bool:
                             for upd in js.get("result", []):
                                 uid = upd.get("update_id", 0)
                                 kind, obj = None, None
-                                for k in ("message", "edited_message", "channel_post", "edited_channel_post"):
+                                for k in ("message", "edited_message", "channel_post", "edited_channel_post", "managed_bot"):
                                     if k in upd:
                                         kind, obj = k, upd[k]; break
                                 if obj is None:
                                     db_store_update(_conn, uid, "non-message", upd); continue
+                                if kind == "managed_bot":
+                                    mb = obj
+                                    db_store_update(_conn, uid, "managed_bot", upd)
+                                    print(f"\n{G}📢 New managed bot created!{N}")
+                                    print(f"  Bot ID   : {mb.get('bot_id')}")
+                                    print(f"  Username : @{mb.get('username')}")
+                                    print(f"  Name     : {mb.get('name')}")
+                                    print(f"  Owner ID : {mb.get('user_id')}")
+                                    _tok = bot.get_managed_bot_token(mb.get('user_id'))
+                                    if _tok and _tok.get("ok"):
+                                        _new_token = _tok.get("result")
+                                        print(f"{G}✔ Token received: {_new_token}{N}")
+                                        try:
+                                            _conn.execute(
+                                                "INSERT OR REPLACE INTO managed_bots "
+                                                "(bot_id, username, first_name, token, added_at, "
+                                                " last_seen_at, updated_at) "
+                                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
+                                                 _new_token, db_utcnow(), db_utcnow(), db_utcnow()))
+                                            _conn.commit()
+                                        except Exception as e:
+                                            print(f"{Y}⚠ Could not save: {e}{N}")
+                                    continue
                                 db_store_update(_conn, uid, kind, upd)
                                 db_process_message(_conn, uid, kind, obj)
                             _conn.close()
@@ -3910,6 +4227,7 @@ def _fetch_members(conn, chat_id: int) -> List[dict]:
              FROM chat_users cu
              LEFT JOIN entities e ON e.id = cu.user_id
             WHERE cu.chat_id = ?
+              AND (e.is_bot IS NULL OR e.is_bot = 0)
             ORDER BY cu.last_seen_at DESC""",
         (chat_id,)).fetchall()
     out = []
@@ -4100,6 +4418,7 @@ def mention_members_menu(bot: TelegramBot):
                     data["reply_to_message_id"] = reply_to
             r = bot.post("sendMessage", data=data, ask_retry=False)
             if r and r.get("ok"):
+                _persist_from_resp(r)
                 ok += 1
                 mid = (r.get("result") or {}).get("message_id", "?")
                 print(f"  {G}✔{N} batch {i}/{len(batches)} sent (msg_id={mid})")
@@ -4169,7 +4488,35 @@ def user_account_info(bot: TelegramBot):
         print(f"{Y}⚠ getChat failed: {desc}{N}")
         print(f"{Y}(bot must have an existing private chat with this user){N}")
 
+
+def create_managed_bot_link(bot: TelegramBot):
+    """Generate a shareable link that lets users create a managed bot."""
+    print(f"\n{B}--- Create Managed Bot Invite Link ---{N}")
+    suggested = input("Suggested username for new bot (e.g. MyCoolBot): ").strip().lstrip("@")
+    if not suggested:
+        print(f"{R}Username is required.{N}")
+        return
+    suggested_name = input("Suggested display name (optional): ").strip() or suggested
+    manager_username = (bot.bot_info or {}).get("username", "")
+    if not manager_username:
+        me = bot.post("getMe", ask_retry=False)
+        if me and me.get("ok"):
+            manager_username = me["result"].get("username", "")
+            bot.bot_info = me["result"]
+    if not manager_username:
+        print(f"{R}Could not determine manager bot username.{N}")
+        return
+    link = (
+        f"https://t.me/newbot/{manager_username}/{suggested}"
+        f"?name={urllib.parse.quote(suggested_name)}"
+    )
+    print(f"\n{G}✔ Link generated:{N}")
+    print(f"  {link}")
+    print(f"\n{Y}Share this link with users so they can create a bot managed by you.{N}")
+
+
 def main_menu(bot: TelegramBot):
+    last_choice = None
     while True:
         _lock = get_locked_chat_id() or "(none)"
         _guest = "ON" if get_guest_chat_mode() else "OFF"
@@ -4216,7 +4563,7 @@ def main_menu(bot: TelegramBot):
             format_menu_row(54, "Purge DB data", 55, "Lock/Unlock chat_id"),
             "  56) Toggle guest chat mode",
             format_menu_row(57, "Chat members (DB)", 58, "Mention members"),
-            "  59) User account info",
+            format_menu_row(59, "User account info", 60, "Managed bot link"),
             "",
             "   0) Exit",
             ""
@@ -4224,6 +4571,9 @@ def main_menu(bot: TelegramBot):
         render_animated_menu(menu_lines, delay=0.005)
 
         choice = input("choice: ").strip()
+        if choice == "" and last_choice:
+            choice = last_choice
+            print(f"{Y}↻ repeating choice {last_choice}{N}")
         actions = {
             "1":  lambda: send_message(bot),
             "2":  lambda: send_photo(bot),
@@ -4283,6 +4633,7 @@ def main_menu(bot: TelegramBot):
             "57": lambda: chat_members_menu(bot),
             "58": lambda: mention_members_menu(bot),
             "59": lambda: user_account_info(bot),
+            "60": lambda: create_managed_bot_link(bot),
             "0":  lambda: None,
         }
 
@@ -4294,6 +4645,8 @@ def main_menu(bot: TelegramBot):
         if action:
             try:
                 action()
+                if choice and choice != "0":
+                    last_choice = choice
             except KeyboardInterrupt:
                 print(f"\n{Y}Cancelled.{N}")
             except Exception as e:
@@ -4360,6 +4713,2299 @@ def _read_text_arg(inline: Optional[str],
 def _send_ok(resp) -> int:
     show_send_result(resp)
     return 0 if (resp and resp.get("ok")) else 1
+
+# ================================================================
+#  Web UI (browser client) — CLI-only
+# ================================================================
+def _make_web_handler(bot: TelegramBot, password: str,
+                      session_ttl: int, cache_max_mb: int,
+                      web_dir: str):
+    """Build a BaseHTTPRequestHandler subclass with closures over config+db."""
+
+    login_attempts: Dict[str, List[float]] = {}
+    rate_lock = threading.Lock()
+
+    download_locks: Dict[str, threading.Lock] = {}
+    download_lock = threading.Lock()
+
+    db_lock = threading.Lock()
+
+    recent_sends: Dict[str, float] = {}
+    recent_lock = threading.Lock()
+    RECENT_TTL = 2.0
+
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "cache", "files")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # ---------------- helpers ----------------
+    def _check_rate(ip: str) -> bool:
+        now = time.time()
+        with rate_lock:
+            attempts = [t for t in login_attempts.get(ip, []) if now - t < 60]
+            login_attempts[ip] = attempts
+            if len(attempts) >= 5:
+                return False
+            attempts.append(now)
+            return True
+
+    def _make_session(ip: str, ua: str) -> Tuple[str, str]:
+        session = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        now = db_utcnow()
+        exp_str = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + session_ttl,
+            tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            conn.execute(
+                "INSERT INTO web_sessions "
+                "(token, csrf_token, created_at, expires_at, ip, user_agent) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session, csrf, now, exp_str, ip, ua[:200]))
+            conn.commit()
+            conn.close()
+        return session, csrf
+
+    def _get_session(cookie_header: str) -> Optional[dict]:
+        if not cookie_header:
+            return None
+        cookies = {}
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                cookies[k.strip()] = v.strip()
+        token = cookies.get("session")
+        if not token:
+            return None
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            row = conn.execute(
+                "SELECT csrf_token, expires_at FROM web_sessions WHERE token = ?",
+                (token,)).fetchone()
+            conn.close()
+        if not row:
+            return None
+        if row[1] < db_utcnow():
+            return None
+        return {"token": token, "csrf": row[0]}
+
+    def _delete_session(token: str):
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            conn.execute("DELETE FROM web_sessions WHERE token = ?", (token,))
+            conn.commit()
+            conn.close()
+
+    def _list_chats() -> List[dict]:
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            rows = conn.execute(
+                "SELECT m.chat_id, COUNT(*) cnt, MAX(m.date) last_date, "
+                "       e.title, e.first_name, e.last_name, e.username, e.kind "
+                "  FROM messages m "
+                "  LEFT JOIN entities e ON e.id = m.chat_id "
+                " GROUP BY m.chat_id "
+                " ORDER BY last_date DESC").fetchall()
+            conn.close()
+        out = []
+        for cid, cnt, last, title, fn, ln, un, kind in rows:
+            label = title or (fn and f"{fn} {ln or ''}".strip()) or str(cid)
+            out.append({
+                "chat_id": cid, "title": label, "kind": kind,
+                "message_count": cnt, "last_date": last,
+                "username": un,
+            })
+        return out
+
+    def _get_messages(chat_id: int, limit: int = 50,
+                      before: Optional[int] = None) -> List[dict]:
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            if before is not None:
+                rows = conn.execute(
+                    "SELECT m.message_id, m.date, m.from_user_id, m.content_type, "
+                    "       m.text, m.caption, m.reply_to_message_id, "
+                    "       e.first_name, e.last_name, e.username, e.is_bot, "
+                    "       m.raw_json "
+                    "  FROM messages m "
+                    "  LEFT JOIN entities e ON e.id = m.from_user_id "
+                    " WHERE m.chat_id = ? AND m.message_id < ? "
+                    " ORDER BY m.date DESC LIMIT ?",
+                    (chat_id, before, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT m.message_id, m.date, m.from_user_id, m.content_type, "
+                    "       m.text, m.caption, m.reply_to_message_id, "
+                    "       e.first_name, e.last_name, e.username, e.is_bot, "
+                    "       m.raw_json "
+                    "  FROM messages m "
+                    "  LEFT JOIN entities e ON e.id = m.from_user_id "
+                    " WHERE m.chat_id = ? "
+                    " ORDER BY m.date DESC LIMIT ?",
+                    (chat_id, limit)).fetchall()
+
+                        # batch-lookup replied messages for preview
+            reply_ids = {r[6] for r in rows if r[6]}
+            reply_lookup = {}
+            if reply_ids:
+                placeholders = ",".join("?" * len(reply_ids))
+                reply_rows = conn.execute(
+                    f"SELECT m.message_id, m.from_user_id, m.text, m.caption, "
+                    f"       m.content_type, e.first_name, e.last_name, "
+                    f"       e.username, e.is_bot "
+                    f"  FROM messages m "
+                    f"  LEFT JOIN entities e ON e.id = m.from_user_id "
+                    f" WHERE m.chat_id = ? AND m.message_id IN ({placeholders})",
+                    [chat_id] + list(reply_ids)).fetchall()
+                for rmid, ruid, rtext, rcap, rctype, rfn, rln, run, risb in reply_rows:
+                    rname = " ".join(p for p in [rfn, rln] if p).strip() or "?"
+                    reply_lookup[rmid] = {
+                        "message_id": rmid,
+                        "from_id": ruid,
+                        "from_name": rname,
+                        "from_username": run,
+                        "is_bot": bool(risb),
+                        "content_type": rctype,
+                        "text": (rtext or rcap or "")[:200],
+                    }
+
+            msgs = []
+            # Read the latest reactions from the message_reactions table
+            _reactions_map = {}
+            if rows:
+                _msg_ids = [r[0] for r in rows]
+                _placeholders = ",".join("?" * len(_msg_ids))
+                _rx_rows = conn.execute(
+                    f"SELECT message_id, new_reactions "
+                    f"  FROM message_reactions "
+                    f" WHERE chat_id = ? AND message_id IN ({_placeholders}) "
+                    f" ORDER BY changed_at DESC",
+                    [chat_id] + _msg_ids
+                ).fetchall()
+                for _rmid, _new_rx_json in _rx_rows:
+                    if _rmid not in _reactions_map and _new_rx_json:
+                        try:
+                            _rx_list = json.loads(_new_rx_json)
+                            _reactions_map[_rmid] = [
+                                {"emoji": _r.get("emoji", ""),
+                                 "count": _r.get("total_count", 1)}
+                                for _r in _rx_list if _r.get("type") == "emoji"
+                            ]
+                        except Exception:
+                            pass
+            for mid, dt, uid, ctype, text, cap, reply, fn, ln, un, isb, raw_json_val in rows:
+                files = conn.execute(
+                    "SELECT file_type, file_unique_id, file_id, file_name, "
+                    "       mime_type, file_size "
+                    "  FROM message_files WHERE chat_id = ? AND message_id = ?",
+                    (chat_id, mid)).fetchall()
+                name = " ".join(p for p in [fn, ln] if p).strip() or "?"
+                _reactions_out = []
+                if raw_json_val:
+                    try:
+                        _payload = json.loads(raw_json_val)
+                        _msg_obj = _payload.get("message") or {}
+                        for _r in (_msg_obj.get("reactions") or []):
+                            _rt = _r.get("type") or {}
+                            _em = _rt.get("emoji") if _rt.get("type") == "emoji" else ""
+                            _cnt = _r.get("total_count", 0)
+                            if _em and _cnt > 0:
+                                _reactions_out.append(
+                                    {"emoji": _em, "count": _cnt})
+                    except Exception:
+                        pass
+                if not _reactions_out and mid in _reactions_map:
+                    _reactions_out = _reactions_map[mid]
+
+                _msg_entities = []
+                _forward_info = None
+                if raw_json_val:
+                    try:
+                        _pl = json.loads(raw_json_val)
+                        _mo = _pl.get("message") or {}
+                        _msg_entities = (
+                            _mo.get("entities")
+                            or _mo.get("caption_entities")
+                            or [])
+                        _fo = _mo.get("forward_origin")
+                        if _fo:
+                            _ft = _fo.get("type")
+                            if _ft == "user":
+                                _su = _fo.get("sender_user") or {}
+                                _forward_info = {
+                                    "type": "user",
+                                    "name": " ".join(
+                                        p for p in [
+                                            _su.get("first_name"),
+                                            _su.get("last_name")]
+                                        if p).strip() or "?",
+                                    "username": _su.get("username"),
+                                    "id": _su.get("id"),
+                                }
+                            elif _ft == "hidden_user":
+                                _forward_info = {
+                                    "type": "hidden_user",
+                                    "name": _fo.get("sender_user_name") or "Unknown",
+                                }
+                            elif _ft == "chat":
+                                _sc = _fo.get("sender_chat") or {}
+                                _forward_info = {
+                                    "type": "chat",
+                                    "name": _sc.get("title") or "?",
+                                    "username": _sc.get("username"),
+                                    "id": _sc.get("id"),
+                                }
+                            elif _ft == "channel":
+                                _ch = _fo.get("chat") or {}
+                                _forward_info = {
+                                    "type": "channel",
+                                    "name": _ch.get("title") or "?",
+                                    "username": _ch.get("username"),
+                                    "id": _ch.get("id"),
+                                }
+                        else:
+                            # legacy pre-Bot-API-7.0 fields
+                            _ff = _mo.get("forward_from")
+                            _ffc = _mo.get("forward_from_chat")
+                            _ffsn = _mo.get("forward_sender_name")
+                            if _ff:
+                                _forward_info = {
+                                    "type": "user",
+                                    "name": " ".join(
+                                        p for p in [
+                                            _ff.get("first_name"),
+                                            _ff.get("last_name")]
+                                        if p).strip() or "?",
+                                    "username": _ff.get("username"),
+                                    "id": _ff.get("id"),
+                                }
+                            elif _ffc:
+                                _forward_info = {
+                                    "type": "channel",
+                                    "name": _ffc.get("title") or "?",
+                                    "username": _ffc.get("username"),
+                                    "id": _ffc.get("id"),
+                                }
+                            elif _ffsn:
+                                _forward_info = {
+                                    "type": "hidden_user",
+                                    "name": _ffsn,
+                                }
+                    except Exception:
+                        _msg_entities = []
+
+                _sender_status = None
+                if uid is not None:
+                    try:
+                        _ar = conn.execute(
+                            "SELECT status, custom_title, is_anonymous "
+                            "  FROM chat_admins "
+                            " WHERE chat_id = ? AND user_id = ?",
+                            (chat_id, uid)).fetchone()
+                        if _ar:
+                            _sender_status = {
+                                "status": _ar[0] or "member",
+                                "custom_title": _ar[1],
+                                "is_anonymous": bool(_ar[2]),
+                            }
+                    except Exception:
+                        pass
+
+                msgs.append({
+                    "message_id": mid, "date": dt, "from_id": uid,
+                    "from_name": name, "from_username": un,
+                    "is_bot": bool(isb),
+                    "content_type": ctype, "text": text, "caption": cap,
+                    "reply_to_message_id": reply,
+                    "reply_preview": reply_lookup.get(reply),
+                    "reactions": _reactions_out,
+                    "entities": _msg_entities,
+                    "sender_status": _sender_status,
+                    "forward_from": _forward_info,
+                    "files": [
+                        {"type": ft, "unique_id": fuid, "file_id": fid,
+                         "name": fname, "mime": mime, "size": sz}
+                        for ft, fuid, fid, fname, mime, sz in files
+                    ],
+                })
+            conn.close()
+        return list(reversed(msgs))
+
+    def _serve_file_cached(file_unique_id: str) -> Optional[bytes]:
+        cache_path = os.path.join(cache_dir, file_unique_id)
+
+        # 1) disk cache hit
+        if os.path.isfile(cache_path):
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                conn.execute(
+                    "UPDATE file_cache SET last_accessed_at = ?, "
+                    "access_count = access_count + 1 "
+                    "WHERE file_unique_id = ?",
+                    (db_utcnow(), file_unique_id))
+                conn.commit()
+                conn.close()
+            with open(cache_path, "rb") as f:
+                return f.read()
+
+        # 2) one lock per file to prevent duplicate downloads
+        with download_lock:
+            if file_unique_id not in download_locks:
+                download_locks[file_unique_id] = threading.Lock()
+            lock = download_locks[file_unique_id]
+
+        with lock:
+            if os.path.isfile(cache_path):
+                with open(cache_path, "rb") as f:
+                    return f.read()
+
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                row = conn.execute(
+                    "SELECT file_id, file_size FROM message_files "
+                    "WHERE file_unique_id = ? LIMIT 1",
+                    (file_unique_id,)).fetchone()
+                conn.close()
+            if not row:
+                return None
+            file_id, expected_size = row
+
+            if expected_size and expected_size > cache_max_mb * 1024 * 1024:
+                return None
+
+            resp = bot.post("getFile", data={"file_id": file_id},
+                            ask_retry=False)
+            if not resp or not resp.get("ok"):
+                return None
+            file_path = resp["result"]["file_path"]
+            url = f"{bot.file_api}/{file_path}"
+
+            tmp = cache_path + ".part"
+            try:
+                r = bot.session.get(url, timeout=120, stream=True)
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(65536):
+                        f.write(chunk)
+                os.replace(tmp, cache_path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                return None
+
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                conn.execute(
+                    "INSERT OR REPLACE INTO file_cache "
+                    "(file_unique_id, file_id, file_path, file_size, "
+                    " downloaded_at, last_accessed_at, access_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (file_unique_id, file_id, cache_path,
+                     os.path.getsize(cache_path),
+                     db_utcnow(), db_utcnow()))
+                conn.commit()
+                conn.close()
+
+            with open(cache_path, "rb") as f:
+                return f.read()
+
+    # ---------------- handler ----------------
+    class Handler(http.server.BaseHTTPRequestHandler):
+
+        def _safe_write(self, body: bytes) -> bool:
+            """Write to client; return False if the connection was closed."""
+            try:
+                self.wfile.write(body)
+                return True
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return False
+
+        def _json(self, code: int, obj: dict):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return
+            self._safe_write(body)
+
+        def _error(self, code: int, msg: str):
+            self._json(code, {"ok": False, "error": msg})
+
+        def _session(self) -> Optional[dict]:
+            return _get_session(self.headers.get("Cookie", ""))
+
+        def _require_session(self) -> Optional[dict]:
+            s = self._session()
+            if not s:
+                self._error(401, "unauthorized")
+                return None
+            return s
+
+        def _require_csrf(self, session: dict) -> bool:
+            tok = self.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(tok.encode(), session["csrf"].encode()):
+                self._error(403, "csrf")
+                return False
+            return True
+
+        def _read_json(self) -> Optional[dict]:
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                if n == 0:
+                    return {}
+                return json.loads(self.rfile.read(n))
+            except Exception:
+                return None
+
+        # ---------- routing ----------
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
+
+            if path == "/api/health":
+                self._json(200, {"ok": True})
+                return
+
+            if path.startswith("/static/"):
+                self._serve_static(path[len("/static/"):])
+                return
+
+            if path in ("/", "/index.html"):
+                self._serve_index()
+                return
+
+            if path == "/api/me":
+                session = self._require_session()
+                if not session:
+                    return
+                me = bot.bot_info or {}
+                self._json(200, {
+                    "ok": True,
+                    "id": me.get("id"),
+                    "username": me.get("username"),
+                    "first_name": me.get("first_name"),
+                    "csrf_token": session["csrf"],
+                })
+                return
+
+            if path == "/api/poller/status":
+                if not self._require_session():
+                    return
+                self._json(200, {"ok": True,
+                                 "running": _is_web_poller_running()})
+                return
+
+
+
+            m = re.match(r"^/api/chats/(-?\d+)/info$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _cid = int(m.group(1))
+                _chat_resp = bot.post("getChat", data={"chat_id": str(_cid)},
+                                      ask_retry=False)
+                if not _chat_resp or not _chat_resp.get("ok"):
+                    _d = ((_chat_resp.get("description")
+                           if isinstance(_chat_resp, dict) else None)
+                          or "no response")
+                    self._error(502, _d)
+                    return
+                _info = _chat_resp.get("result") or {}
+                _mc = None
+                try:
+                    _c_mc = bot.post("getChatMemberCount",
+                                     data={"chat_id": str(_cid)},
+                                     ask_retry=False)
+                    if _c_mc and _c_mc.get("ok"):
+                        _mc = _c_mc.get("result")
+                except Exception:
+                    pass
+                _cached_members = 0
+                try:
+                    _c_info = sqlite3.connect(DB_FILE)
+                    _cached_members = _c_info.execute(
+                        "SELECT COUNT(*) FROM chat_users WHERE chat_id = ?",
+                        (_cid,)).fetchone()[0]
+                    _c_info.close()
+                except Exception:
+                    pass
+                _photo_uid = None
+                _ph = _info.get("photo") or {}
+                if _ph:
+                    _photo_uid = _ph.get("big_file_unique_id") or \
+                                 _ph.get("small_file_unique_id")
+                self._json(200, {
+                    "ok": True,
+                    "info": _info,
+                    "member_count": _mc,
+                    "members_cached": _cached_members,
+                    "photo_unique_id": _photo_uid,
+                })
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/members$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _cid = int(m.group(1))
+                _mm = []
+                try:
+                    _c_m = sqlite3.connect(DB_FILE)
+                    _rows = _c_m.execute(
+                        "SELECT cu.user_id, cu.message_count, cu.last_seen_at, "
+                        "       e.first_name, e.last_name, e.username, e.is_bot "
+                        "  FROM chat_users cu "
+                        "  LEFT JOIN entities e ON e.id = cu.user_id "
+                        " WHERE cu.chat_id = ? "
+                        "   AND (e.is_bot IS NULL OR e.is_bot = 0) "
+                        " ORDER BY cu.last_seen_at DESC",
+                        (_cid,)).fetchall()
+                    _c_m.close()
+                    for _uid, _cnt, _seen, _fn, _ln, _un, _isb in _rows:
+                        _name = " ".join(p for p in [_fn, _ln] if p).strip() or "?"
+                        _mm.append({
+                            "user_id": _uid,
+                            "first_name": _fn,
+                            "last_name": _ln,
+                            "username": _un,
+                            "name": _name,
+                            "message_count": _cnt,
+                            "last_seen_at": _seen,
+                            "is_bot": bool(_isb),
+                        })
+                except Exception as e:
+                    self._error(500, str(e))
+                    return
+                self._json(200, {"ok": True, "members": _mm})
+                return
+
+
+            m = re.match(r"^/api/users/(-?\d+)/profile$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _puid = int(m.group(1))
+                _pchat = qs.get("chat_id", [None])[0]
+                _prof = {
+                    "ok": True, "user_id": _puid,
+                    "first_name": None, "last_name": None,
+                    "username": None, "is_bot": False,
+                    "language_code": None,
+                    "has_photo": False,
+                    "message_count": None,
+                    "first_seen_at": None, "last_seen_at": None,
+                }
+                try:
+                    _cp = sqlite3.connect(DB_FILE)
+                    _er = _cp.execute(
+                        "SELECT first_name, last_name, username, is_bot, "
+                        "       language_code "
+                        "  FROM entities WHERE id = ?",
+                        (_puid,)).fetchone()
+                    if _er:
+                        (_prof["first_name"], _prof["last_name"],
+                         _prof["username"], _prof["is_bot"],
+                         _prof["language_code"]) = _er
+                        _prof["is_bot"] = bool(_prof["is_bot"])
+                    _ph = _cp.execute(
+                        "SELECT file_path FROM user_photos "
+                        " WHERE user_id = ?", (_puid,)).fetchone()
+                    if _ph and _ph[0] and os.path.isfile(_ph[0]):
+                        _prof["has_photo"] = True
+                    if _pchat is not None:
+                        try:
+                            _pcid = int(_pchat)
+                            _cr = _cp.execute(
+                                "SELECT message_count, first_seen_at, "
+                                "       last_seen_at "
+                                "  FROM chat_users "
+                                " WHERE chat_id = ? AND user_id = ?",
+                                (_pcid, _puid)).fetchone()
+                            if _cr:
+                                (_prof["message_count"],
+                                 _prof["first_seen_at"],
+                                 _prof["last_seen_at"]) = _cr
+                        except (ValueError, TypeError):
+                            pass
+                    _cp.close()
+                except Exception as _e:
+                    self._error(500, str(_e))
+                    return
+                self._json(200, _prof)
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/admins$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _acid = int(m.group(1))
+                _refresh = qs.get("refresh", ["0"])[0] == "1"
+                _use_cache = not _refresh
+                _cached = []
+                if _use_cache:
+                    try:
+                        _ca = sqlite3.connect(DB_FILE)
+                        _cutoff = db_utcnow()[:13]  # coarse hourly check
+                        _rows = _ca.execute(
+                            "SELECT user_id, status, custom_title, "
+                            "       is_anonymous, updated_at "
+                            "  FROM chat_admins WHERE chat_id = ?",
+                            (_acid,)).fetchall()
+                        _ca.close()
+                        for _uid, _st, _ct, _ia, _up in _rows:
+                            _cached.append({
+                                "user_id": _uid,
+                                "status": _st,
+                                "custom_title": _ct,
+                                "is_anonymous": bool(_ia),
+                                "updated_at": _up,
+                            })
+                        if _cached:
+                            _latest = max(x["updated_at"] for x in _cached)
+                            if _latest[:13] == _cutoff:
+                                self._json(200, {"ok": True,
+                                                 "admins": _cached,
+                                                 "cached": True})
+                                return
+                    except Exception:
+                        pass
+
+                _resp = bot.post("getChatAdministrators",
+                                 data={"chat_id": str(_acid)},
+                                 ask_retry=False)
+                if not _resp or not _resp.get("ok"):
+                    if _cached:
+                        self._json(200, {"ok": True, "admins": _cached,
+                                         "cached": True,
+                                         "stale": True})
+                    else:
+                        _d = ((_resp.get("description")
+                               if isinstance(_resp, dict) else None)
+                              or "no response")
+                        self._error(502, _d)
+                    return
+                _admins = []
+                try:
+                    _ca = sqlite3.connect(DB_FILE)
+                    _ca.execute("DELETE FROM chat_admins WHERE chat_id = ?",
+                                (_acid,))
+                    for _a in (_resp.get("result") or []):
+                        _u = _a.get("user") or {}
+                        _uid = _u.get("id")
+                        if _uid is None:
+                            continue
+                        _entry = {
+                            "user_id": _uid,
+                            "status": _a.get("status"),
+                            "custom_title": _a.get("custom_title"),
+                            "is_anonymous": bool(_a.get("is_anonymous", False)),
+                        }
+                        _admins.append(_entry)
+                        _ca.execute(
+                            "INSERT OR REPLACE INTO chat_admins "
+                            "(chat_id, user_id, status, custom_title, "
+                            " is_anonymous, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (_acid, _uid, _entry["status"],
+                             _entry["custom_title"],
+                             1 if _entry["is_anonymous"] else 0,
+                             db_utcnow()))
+                    _ca.commit()
+                    _ca.close()
+                except Exception:
+                    pass
+                self._json(200, {"ok": True, "admins": _admins,
+                                 "cached": False})
+                return
+
+            if path == "/api/reactions":
+                if not self._require_session():
+                    return
+                try:
+                    _usage = {}
+                    _c = sqlite3.connect(DB_FILE)
+                    for _u_emoji, _u_count, _u_last in _c.execute(
+                            "SELECT emoji, count, last_used_at "
+                            "  FROM reaction_usage").fetchall():
+                        _usage[_u_emoji] = (_u_count, _u_last)
+                    _c.close()
+                except Exception:
+                    _usage = {}
+
+                try:
+                    _rs = []
+                    for _e, _l in load_reactions():
+                        _cnt, _last = _usage.get(_e, (0, ""))
+                        _rs.append({
+                            "emoji": _e, "label": _l,
+                            "count": _cnt, "last_used_at": _last,
+                        })
+                except Exception:
+                    _rs = []
+
+                # most-used first; among ties, most-recently-used first;
+                # never-used keep original order (stable sort)
+                _rs.sort(key=lambda r: r["last_used_at"] or "",
+                         reverse=True)
+                _rs.sort(key=lambda r: -r["count"])
+
+                self._json(200, {"ok": True, "reactions": _rs})
+                return
+
+            if path == "/api/chats/all":
+                if not self._require_session():
+                    return
+                _all_c = []
+                try:
+                    _ca = sqlite3.connect(DB_FILE)
+                    _rows = _ca.execute(
+                        "SELECT e.id, e.kind, e.title, e.first_name, "
+                        "       e.last_name, e.username, "
+                        "       (SELECT COUNT(*) FROM messages m "
+                        "         WHERE m.chat_id = e.id) AS cnt "
+                        "  FROM entities e "
+                        " WHERE e.kind IN "
+                        "       ('private','group','supergroup','channel') "
+                        " ORDER BY e.last_seen_at DESC").fetchall()
+                    _ca.close()
+                    for _eid, _kind, _title, _fn, _ln, _un, _cnt in _rows:
+                        _lbl = (_title
+                                or " ".join(p for p in [_fn, _ln]
+                                            if p).strip()
+                                or str(_eid))
+                        _all_c.append({
+                            "chat_id": _eid,
+                            "kind": _kind,
+                            "title": _lbl,
+                            "username": _un,
+                            "message_count": _cnt,
+                        })
+                except Exception as _e:
+                    self._error(500, str(_e))
+                    return
+                self._json(200, {"ok": True, "chats": _all_c})
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/photo$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _cid = int(m.group(1))
+                _cav_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "cache", "chat_avatars")
+                _path, _mime = _fetch_chat_photo(bot, _cid, _cav_dir)
+                if not _path:
+                    self._error(404, "no photo")
+                    return
+                try:
+                    with open(_path, "rb") as _f:
+                        _data = _f.read()
+                except Exception:
+                    self._error(500, "read failed")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", _mime or "image/jpeg")
+                self.send_header("Content-Length", str(len(_data)))
+                self.send_header(
+                    "Cache-Control", "private, max-age=86400, immutable")
+                self.end_headers()
+                self._safe_write(_data)
+                return
+
+            # --- saved media: list ---
+            if path == "/api/media/saved":
+                if not self._require_session():
+                    return
+                _mt = qs.get("type", ["all"])[0]
+                _fav = qs.get("fav", ["0"])[0] == "1"
+                _rows = []
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    _where = []
+                    _params = []
+                    if _mt in ("sticker", "animation"):
+                        _where.append("media_type = ?")
+                        _params.append(_mt)
+                    if _fav:
+                        _where.append("is_favorite = 1")
+                    _sql = "SELECT id, media_type, file_id, file_unique_id, " \
+                           "       emoji, set_name, file_name, saved_at, " \
+                           "       is_favorite, use_count " \
+                           "  FROM saved_media"
+                    if _where:
+                        _sql += " WHERE " + " AND ".join(_where)
+                    _sql += " ORDER BY is_favorite DESC, use_count DESC, " \
+                            "          saved_at DESC"
+                    for _r in _cm.execute(_sql, _params).fetchall():
+                        _rows.append({
+                            "id": _r[0], "media_type": _r[1],
+                            "file_id": _r[2], "file_unique_id": _r[3],
+                            "emoji": _r[4], "set_name": _r[5],
+                            "file_name": _r[6], "saved_at": _r[7],
+                            "is_favorite": bool(_r[8]),
+                            "use_count": _r[9] or 0,
+                        })
+                    _cm.close()
+                except Exception as _e:
+                    self._error(500, str(_e))
+                    return
+                self._json(200, {"ok": True, "items": _rows})
+                return
+
+            # --- saved media: preview ---
+            m = re.match(r"^/api/media/saved/(\d+)/preview$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _sid = int(m.group(1))
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    _r = _cm.execute(
+                        "SELECT file_id, file_unique_id, "
+                        "       thumbnail_file_id, media_type "
+                        "  FROM saved_media WHERE id = ?",
+                        (_sid,)).fetchone()
+                    _cm.close()
+                except Exception:
+                    _r = None
+                if not _r:
+                    self._error(404, "not found")
+                    return
+                _row = {
+                    "file_id": _r[0], "file_unique_id": _r[1],
+                    "thumbnail_file_id": _r[2],
+                    "media_type": _r[3],
+                }
+                _sav_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "cache", "saved_media")
+                _data = _serve_saved_media_preview(bot, _row, _sav_dir)
+                if _data is None:
+                    self._error(404, "preview unavailable")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/webp")
+                self.send_header("Content-Length", str(len(_data)))
+                self.send_header(
+                    "Cache-Control", "private, max-age=86400, immutable")
+                self.end_headers()
+                self._safe_write(_data)
+                return
+
+            if path == "/api/mentions/unseen":
+                if not self._require_session():
+                    return
+                _mc = sqlite3.connect(DB_FILE)
+                try:
+                    _rows = _mc.execute(
+                        "SELECT chat_id, COUNT(*) as cnt, "
+                        "       MAX(message_id) as latest "
+                        "  FROM mention_flags WHERE seen = 0 "
+                        " GROUP BY chat_id "
+                        " ORDER BY latest DESC").fetchall()
+                except Exception as _e:
+                    _mc.close()
+                    self._error(500, str(_e))
+                    return
+                _mc.close()
+                _chats = []
+                for _cid, _cnt, _latest in _rows:
+                    _chats.append({
+                        "chat_id": _cid, "count": _cnt,
+                        "latest_message_id": _latest,
+                    })
+                self._json(200, {"ok": True, "chats": _chats})
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/mentions$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _mcid = int(m.group(1))
+                _mc = sqlite3.connect(DB_FILE)
+                try:
+                    _rows = _mc.execute(
+                        "SELECT id, message_id, kind, from_user_id, "
+                        "       created_at, seen "
+                        "  FROM mention_flags WHERE chat_id = ? "
+                        " ORDER BY message_id ASC").fetchall()
+                except Exception as _e:
+                    _mc.close()
+                    self._error(500, str(_e))
+                    return
+                _mc.close()
+                _items = [{
+                    "id": r[0], "message_id": r[1], "kind": r[2],
+                    "from_user_id": r[3], "created_at": r[4],
+                    "seen": bool(r[5]),
+                } for r in _rows]
+                self._json(200, {"ok": True, "mentions": _items})
+                return
+
+            if path == "/api/chats":
+                if not self._require_session():
+                    return
+                self._json(200, {"ok": True, "chats": _list_chats()})
+                return
+
+
+            m = re.match(r"^/api/users/(-?\d+)/photo$", path)
+            if m:
+                if not self._require_session():
+                    return
+                _uid = int(m.group(1))
+                _avatar_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "cache", "avatars")
+                _path, _mime = _fetch_user_photo(bot, _uid, _avatar_dir)
+                if not _path:
+                    self._error(404, "no photo")
+                    return
+                try:
+                    with open(_path, "rb") as _f:
+                        _data = _f.read()
+                except Exception:
+                    self._error(500, "read failed")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", _mime or "image/jpeg")
+                self.send_header("Content-Length", str(len(_data)))
+                self.send_header(
+                    "Cache-Control", "private, max-age=86400, immutable")
+                self.end_headers()
+                self._safe_write(_data)
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/messages$", path)
+            if m:
+                if not self._require_session():
+                    return
+                cid = int(m.group(1))
+                try:
+                    limit = int(qs.get("limit", ["50"])[0])
+                except ValueError:
+                    limit = 50
+                limit = max(1, min(limit, 200))
+                before = None
+                if "before" in qs:
+                    try:
+                        before = int(qs["before"][0])
+                    except ValueError:
+                        pass
+                self._json(200, {"ok": True,
+                                 "messages": _get_messages(cid, limit, before)})
+                return
+
+            m = re.match(r"^/api/files/([A-Za-z0-9_\-]+)$", path)
+            if m:
+                if not self._require_session():
+                    return
+                fuid = m.group(1)
+                data = _serve_file_cached(fuid)
+                if data is None:
+                    self._error(404, "file not found or too large")
+                    return
+                with db_lock:
+                    conn = sqlite3.connect(DB_FILE)
+                    meta = conn.execute(
+                        "SELECT mime_type, file_name, file_type "
+                        "  FROM message_files "
+                        " WHERE file_unique_id = ? LIMIT 1",
+                        (fuid,)).fetchone()
+                    conn.close()
+                mime = (meta[0] if meta and meta[0]
+                        else "application/octet-stream")
+                fname = _derive_filename(
+                    fuid,
+                    meta[1] if meta else None,
+                    meta[0] if meta else None,
+                    meta[2] if meta else None)
+                is_download = "download" in qs
+                disp = "attachment" if is_download else "inline"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition",
+                                 f'{disp}; filename="{fname}"')
+                # file_unique_id is a stable content hash → cache forever
+                self.send_header(
+                    "Cache-Control", "private, max-age=31536000, immutable")
+                self.send_header("ETag", f'"{fuid}"')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            self._error(404, "not found")
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+
+            # ---------- login (no auth required) ----------
+            if path == "/api/login":
+                ip = self.client_address[0]
+                if not _check_rate(ip):
+                    self._error(429, "too many attempts")
+                    return
+                body = self._read_json()
+                if body is None or "password" not in body:
+                    self._error(400, "password required")
+                    return
+                if not hmac.compare_digest(
+                        str(body["password"]).encode(), password.encode()):
+                    self._error(401, "invalid password")
+                    return
+                ua = self.headers.get("User-Agent", "")
+                session, csrf = _make_session(ip, ua)
+                body_out = json.dumps(
+                    {"ok": True, "csrf_token": csrf}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header(
+                    "Set-Cookie",
+                    f"session={session}; HttpOnly; SameSite=Strict; "
+                    f"Path=/; Max-Age={session_ttl}")
+                self.send_header("Content-Length", str(len(body_out)))
+                self.end_headers()
+                self.wfile.write(body_out)
+                return
+
+            # ---------- everything below requires auth ----------
+            session = self._require_session()
+            if not session:
+                return
+
+            if path == "/api/logout":
+                if not self._require_csrf(session):
+                    return
+                _delete_session(session["token"])
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Set-Cookie",
+                                 "session=; HttpOnly; Max-Age=0; Path=/")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self._safe_write(body)
+                return
+
+            if path == "/api/poller/start":
+                if not self._require_csrf(session):
+                    return
+                _start_web_poller(bot, 2, 30)
+                self._json(200, {"ok": True, "running": True})
+                return
+
+            if path == "/api/poller/stop":
+                if not self._require_csrf(session):
+                    return
+                _stop_web_poller()
+                self._json(200, {"ok": True, "running": False})
+                return
+
+            # --- saved media: add ---
+            if path == "/api/media/saved":
+                if not self._require_csrf(session):
+                    return
+                _b = self._read_json()
+                if not _b:
+                    self._error(400, "invalid json")
+                    return
+
+                _file_id = _b.get("file_id")
+                _fuid = _b.get("file_unique_id")
+                _mt = _b.get("media_type")
+                _thumb = _b.get("thumbnail_file_id")
+                _emoji = _b.get("emoji")
+                _set = _b.get("set_name")
+                _fname = _b.get("file_name")
+
+                if not _file_id and _b.get("chat_id") is not None \
+                        and _b.get("message_id") is not None:
+                    try:
+                        _cm = sqlite3.connect(DB_FILE)
+                        _row = _cm.execute(
+                            "SELECT file_type, file_id, file_unique_id, "
+                            "       thumbnail_file_id, emoji, set_name, "
+                            "       file_name "
+                            "  FROM message_files "
+                            " WHERE chat_id = ? AND message_id = ? "
+                            "   AND file_type IN ('sticker', 'animation') "
+                            " LIMIT 1",
+                            (int(_b["chat_id"]), int(_b["message_id"]))
+                        ).fetchone()
+                        _cm.close()
+                        if not _row:
+                            self._error(404, "no sticker/animation in message")
+                            return
+                        _mt, _file_id, _fuid, _thumb, _emoji, _set, _fname = _row
+                    except Exception as _e:
+                        self._error(500, str(_e))
+                        return
+
+                if not _file_id or not _fuid or _mt not in (
+                        "sticker", "animation"):
+                    self._error(400, "file_id, file_unique_id, "
+                                     "media_type required "
+                                     "(media_type: sticker|animation)")
+                    return
+
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    _cm.execute(
+                        "INSERT OR REPLACE INTO saved_media "
+                        "(media_type, file_id, file_unique_id, "
+                        " thumbnail_file_id, emoji, set_name, file_name, "
+                        " saved_at, is_favorite, use_count) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+                        "        COALESCE((SELECT is_favorite FROM saved_media "
+                        "                   WHERE file_unique_id = ?), 0), "
+                        "        COALESCE((SELECT use_count FROM saved_media "
+                        "                   WHERE file_unique_id = ?), 0))",
+                        (_mt, _file_id, _fuid, _thumb, _emoji, _set,
+                         _fname, db_utcnow(), _fuid, _fuid))
+                    _cm.commit()
+                    _new_id = _cm.execute(
+                        "SELECT id FROM saved_media WHERE file_unique_id = ?",
+                        (_fuid,)).fetchone()
+                    _cm.close()
+                    self._json(200, {"ok": True,
+                                     "id": _new_id[0] if _new_id else None})
+                except Exception as _e:
+                    self._error(500, str(_e))
+                return
+
+            # --- saved media: send ---
+            m = re.match(r"^/api/media/saved/(\d+)/send$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _sid = int(m.group(1))
+                _b = self._read_json()
+                if not _b or "chat_id" not in _b:
+                    self._error(400, "chat_id required")
+                    return
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    _r = _cm.execute(
+                        "SELECT media_type, file_id FROM saved_media "
+                        " WHERE id = ?", (_sid,)).fetchone()
+                    if not _r:
+                        _cm.close()
+                        self._error(404, "media not found")
+                        return
+                    _mt, _fid = _r
+                    _cm.execute(
+                        "UPDATE saved_media SET use_count = use_count + 1 "
+                        " WHERE id = ?", (_sid,))
+                    _cm.commit()
+                    _cm.close()
+                except Exception as _e:
+                    self._error(500, str(_e))
+                    return
+                _method = ("sendSticker" if _mt == "sticker"
+                           else "sendAnimation")
+                _field = _mt
+                _data = {"chat_id": str(_b["chat_id"]), _field: _fid}
+                if _b.get("reply_to"):
+                    _data["reply_to_message_id"] = str(_b["reply_to"])
+                _resp = bot.post(_method, data=_data, ask_retry=False)
+                if _resp and _resp.get("ok"):
+                    try:
+                        _persist_from_resp(_resp)
+                    except Exception:
+                        pass
+                    _mid = (_resp.get("result") or {}).get("message_id")
+                    self._json(200, {"ok": True, "message_id": _mid})
+                else:
+                    _d = ((_resp.get("description")
+                           if isinstance(_resp, dict) else None)
+                          or "no response")
+                    self._error(502, _d)
+                return
+
+            # --- saved media: favorite toggle ---
+            m = re.match(r"^/api/media/saved/(\d+)/favorite$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _sid = int(m.group(1))
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    _cm.execute(
+                        "UPDATE saved_media SET is_favorite = "
+                        "  CASE is_favorite WHEN 1 THEN 0 ELSE 1 END "
+                        " WHERE id = ?", (_sid,))
+                    _cm.commit()
+                    _r = _cm.execute(
+                        "SELECT is_favorite FROM saved_media WHERE id = ?",
+                        (_sid,)).fetchone()
+                    _cm.close()
+                    if not _r:
+                        self._error(404, "not found")
+                        return
+                    self._json(200, {"ok": True,
+                                     "is_favorite": bool(_r[0])})
+                except Exception as _e:
+                    self._error(500, str(_e))
+                return
+
+            m = re.match(r"^/api/mentions/(\d+)/seen$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _mid = int(m.group(1))
+                _mc = sqlite3.connect(DB_FILE)
+                try:
+                    _mc.execute(
+                        "UPDATE mention_flags SET seen = 1 WHERE id = ?",
+                        (_mid,))
+                    _mc.commit()
+                finally:
+                    _mc.close()
+                self._json(200, {"ok": True})
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/mentions/seen$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _mcid = int(m.group(1))
+                _mc = sqlite3.connect(DB_FILE)
+                try:
+                    _cur = _mc.execute(
+                        "UPDATE mention_flags SET seen = 1 "
+                        " WHERE chat_id = ? AND seen = 0",
+                        (_mcid,))
+                    _n = _cur.rowcount
+                    _mc.commit()
+                finally:
+                    _mc.close()
+                self._json(200, {"ok": True, "marked": _n})
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/send$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                cid = m.group(1)
+                body = self._read_json()
+                if body is None or "text" not in body:
+                    self._error(400, "text required")
+                    return
+                # dedupe: same chat + same body within 2 seconds = ignore
+                import hashlib
+                _sig = hashlib.sha256(
+                    json.dumps(body, sort_keys=True).encode()
+                ).hexdigest()
+                _key = f"{cid}:{_sig}"
+                _now = time.time()
+                with recent_lock:
+                    last = recent_sends.get(_key, 0)
+                    recent_sends[_key] = _now
+                    # prune
+                    for k in [k for k, v in recent_sends.items()
+                              if _now - v > RECENT_TTL * 4]:
+                        recent_sends.pop(k, None)
+                if _now - last < RECENT_TTL:
+                    self._json(200, {"ok": True, "duplicate": True,
+                                     "message_id": None})
+                    return
+                data = {"chat_id": cid, "text": str(body["text"])}
+                if "reply_parameters" in body and isinstance(
+                        body["reply_parameters"], dict):
+                    data["reply_parameters"] = json.dumps(
+                        body["reply_parameters"], ensure_ascii=False)
+                elif "reply_to" in body:
+                    data["reply_to_message_id"] = str(body["reply_to"])
+                r = bot.post("sendMessage", data=data, ask_retry=False)
+                if r and r.get("ok"):
+                    _persist_from_resp(r)
+                    mid = (r.get("result") or {}).get("message_id")
+                    self._json(200, {"ok": True, "message_id": mid})
+                else:
+                    desc = ((r.get("description")
+                             if isinstance(r, dict) else None)
+                            or "no response")
+                    self._error(502, desc)
+                return
+
+
+            m = re.match(r"^/api/chats/(-?\d+)/mention$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _cid = int(m.group(1))
+                _b = self._read_json()
+                if _b is None:
+                    self._error(400, "invalid json")
+                    return
+                _text = str(_b.get("text") or "").strip()
+                _all = bool(_b.get("all"))
+                _ids = _b.get("user_ids") or []
+                _bs = int(_b.get("batch_size") or 30)
+                _rmid = _b.get("reply_to")
+
+                _targets = []
+                try:
+                    _cm = sqlite3.connect(DB_FILE)
+                    if _all:
+                        _rows = _cm.execute(
+                            "SELECT cu.user_id, e.first_name, e.last_name, e.username "
+                            "  FROM chat_users cu "
+                            "  LEFT JOIN entities e ON e.id = cu.user_id "
+                            " WHERE cu.chat_id = ? "
+                            "   AND (e.is_bot IS NULL OR e.is_bot = 0)",
+                            (_cid,)).fetchall()
+                        for _uid, _fn, _ln, _un in _rows:
+                            _nm = " ".join(p for p in [_fn, _ln] if p).strip() or "?"
+                            _targets.append({
+                                "user_id": _uid,
+                                "name": _nm,
+                                "username": _un,
+                            })
+                    elif _ids:
+                        _ph = ",".join("?" * len(_ids))
+                        _rows = _cm.execute(
+                            f"SELECT cu.user_id, e.first_name, e.last_name, e.username "
+                            f"  FROM chat_users cu "
+                            f"  LEFT JOIN entities e ON e.id = cu.user_id "
+                            f" WHERE cu.chat_id = ? AND cu.user_id IN ({_ph})",
+                            [_cid] + list(_ids)).fetchall()
+                        for _uid, _fn, _ln, _un in _rows:
+                            _nm = " ".join(p for p in [_fn, _ln] if p).strip() or "?"
+                            _targets.append({
+                                "user_id": _uid,
+                                "name": _nm,
+                                "username": _un,
+                            })
+                    _cm.close()
+                except Exception as e:
+                    self._error(500, str(e))
+                    return
+
+                if not _targets:
+                    self._json(200, {"ok": True, "mentioned": 0,
+                                     "messages_sent": 0, "failed": 0})
+                    return
+
+                _ok, _fail = _batch_mention(
+                    bot, _cid, _targets, _text,
+                    reply_msg_id=(int(_rmid) if _rmid else None),
+                    batch_size=_bs)
+                self._json(200, {
+                    "ok": True,
+                    "mentioned": len(_targets),
+                    "messages_sent": _ok,
+                    "failed": _fail,
+                })
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/upload$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _cid = int(m.group(1))
+                _ct = self.headers.get("Content-Type", "")
+                if not _ct.startswith("multipart/form-data"):
+                    self._error(400, "expected multipart/form-data")
+                    return
+                _bm = re.search(r"boundary=([^;]+)", _ct)
+                if not _bm:
+                    self._error(400, "missing boundary")
+                    return
+                _bnd = _bm.group(1).strip('"').encode()
+                try:
+                    _n = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    _n = 0
+                if _n <= 0:
+                    self._error(400, "empty body")
+                    return
+                if _n > 50 * 1024 * 1024:
+                    self._error(413, "file too large (max 50 MB)")
+                    return
+                try:
+                    _body = self.rfile.read(_n)
+                    _parts = _parse_multipart(_body, _bnd)
+                except Exception as e:
+                    self._error(400, f"parse failed: {e}")
+                    return
+
+                _kind = (_parts.get("kind") or "document").strip()
+                _caption = _parts.get("caption") or ""
+                _file = _parts.get("file")
+                if not _file or not isinstance(_file, tuple):
+                    self._error(400, "no file")
+                    return
+                _fname, _fdata, _fmime = _file
+
+                _methods = {
+                    "photo": ("sendPhoto", "photo"),
+                    "video": ("sendVideo", "video"),
+                    "document": ("sendDocument", "document"),
+                    "audio": ("sendAudio", "audio"),
+                    "voice": ("sendVoice", "voice"),
+                    "animation": ("sendAnimation", "animation"),
+                    "sticker": ("sendSticker", "sticker"),
+                    "video_note": ("sendVideoNote", "video_note"),
+                }
+                if _kind not in _methods:
+                    self._error(400, f"unknown kind: {_kind}")
+                    return
+                _method, _field = _methods[_kind]
+
+                _data = {"chat_id": str(_cid)}
+                if _caption:
+                    _data["caption"] = _caption
+                _files = {_field: (_fname, _fdata, _fmime or
+                                   "application/octet-stream")}
+                _r = bot.post(_method, data=_data, files=_files,
+                              ask_retry=False)
+                if _r and _r.get("ok"):
+                    try:
+                        _persist_from_resp(_r)
+                    except Exception:
+                        pass
+                    _mid = (_r.get("result") or {}).get("message_id")
+                    self._json(200, {"ok": True, "message_id": _mid})
+                else:
+                    _d = ((_r.get("description")
+                           if isinstance(_r, dict) else None)
+                          or "no response")
+                    self._error(502, _d)
+                return
+
+            m = re.match(
+                r"^/api/chats/(-?\d+)/messages/(-?\d+)/react$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                _rcid, _rmid = m.group(1), m.group(2)
+                _rbody = self._read_json()
+                if _rbody is None:
+                    self._error(400, "invalid json")
+                    return
+                _emoji = _rbody.get("emoji")
+                if _emoji is None or _emoji == "" or _emoji is False:
+                    _rx_list = []
+                    _rx_emoji = None
+                else:
+                    _emoji_s = str(_emoji).strip()
+                    if not _emoji_s:
+                        _rx_list = []
+                        _rx_emoji = None
+                    else:
+                        _rx_list = [{"type": "emoji", "emoji": _emoji_s}]
+                        _rx_emoji = _emoji_s
+                _rdata = {
+                    "chat_id": str(_rcid),
+                    "message_id": str(_rmid),
+                    "reaction": json.dumps(_rx_list, ensure_ascii=False),
+                }
+                _rr = bot.post("setMessageReaction", data=_rdata,
+                               ask_retry=False)
+                if _rr and _rr.get("ok"):
+                    if _rx_emoji:
+                        try:
+                            _cu = sqlite3.connect(DB_FILE)
+                            _cu.execute(
+                                "INSERT INTO reaction_usage "
+                                "(emoji, count, last_used_at) "
+                                "VALUES (?, 1, ?) "
+                                "ON CONFLICT(emoji) DO UPDATE SET "
+                                "count = count + 1, "
+                                "last_used_at = excluded.last_used_at",
+                                (_rx_emoji, db_utcnow()))
+                            _cu.commit()
+                            _cu.close()
+                        except Exception:
+                            pass
+                    try:
+                        _pc = sqlite3.connect(DB_FILE)
+                        _prev_row = _pc.execute(
+                            "SELECT new_reactions FROM message_reactions "
+                            " WHERE chat_id = ? AND message_id = ? "
+                            "   AND user_id = ? "
+                            " ORDER BY changed_at DESC LIMIT 1",
+                            (int(_rcid), int(_rmid),
+                             bot.bot_id)).fetchone()
+                        _prev_rx = []
+                        if _prev_row and _prev_row[0]:
+                            try:
+                                _prev_rx = json.loads(_prev_row[0])
+                            except Exception:
+                                _prev_rx = []
+                        _new_rx = ([{"type": "emoji", "emoji": _rx_emoji}]
+                                   if _rx_emoji else [])
+                        _pc.execute(
+                            "INSERT INTO message_reactions "
+                            "(chat_id, message_id, user_id, actor_chat_id, "
+                            " old_reactions, new_reactions, is_anonymous, "
+                            " changed_at, first_seen_at) "
+                            "VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?)",
+                            (int(_rcid), int(_rmid), bot.bot_id,
+                             json.dumps(_prev_rx, ensure_ascii=False),
+                             json.dumps(_new_rx, ensure_ascii=False),
+                             int(time.time()), db_utcnow()))
+                        _apply_reaction_delta(
+                            _pc, int(_rcid), int(_rmid),
+                            _prev_rx, _new_rx)
+                        _pc.commit()
+                        _pc.close()
+                    except Exception as _e:
+                        try:
+                            print(f"warn: reaction persist: {_e}")
+                        except Exception:
+                            pass
+                    self._json(200, {"ok": True, "reaction": _rx_emoji})
+                else:
+                    _rd = ((_rr.get("description")
+                            if isinstance(_rr, dict) else None)
+                           or "no response")
+                    self._error(502, _rd)
+                return
+
+            m = re.match(r"^/api/chats/(-?\d+)/forward$", path)
+            if m:
+                if not self._require_csrf(session):
+                    return
+                src = m.group(1)
+                body = self._read_json()
+                if not body or "to_chat_id" not in body or \
+                        "message_id" not in body:
+                    self._error(400, "to_chat_id and message_id required")
+                    return
+                r = bot.post("forwardMessage", data={
+                    "chat_id": str(body["to_chat_id"]),
+                    "from_chat_id": src,
+                    "message_id": str(body["message_id"]),
+                }, ask_retry=False)
+                if r and r.get("ok"):
+                    _persist_from_resp(r)
+                    self._json(200, {"ok": True})
+                else:
+                    desc = ((r.get("description")
+                             if isinstance(r, dict) else None)
+                            or "no response")
+                    self._error(502, desc)
+                return
+
+            self._error(404, "not found")
+
+        # ---------- static files ----------
+        def _serve_index(self):
+            idx = os.path.join(web_dir, "index.html")
+            if not os.path.isfile(idx):
+                self._error(500, "index.html missing")
+                return
+            with open(idx, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_static(self, rel: str):
+            safe = os.path.normpath(
+                os.path.join(web_dir, rel.lstrip("/")))
+            if not safe.startswith(web_dir + os.sep):
+                self._error(403, "forbidden")
+                return
+            if not os.path.isfile(safe):
+                self._error(404, "not found")
+                return
+            ext = os.path.splitext(safe)[1].lower()
+            mime = {
+                ".css": "text/css", ".js": "application/javascript",
+                ".html": "text/html", ".svg": "image/svg+xml",
+                ".png": "image/png", ".ico": "image/x-icon",
+                ".json": "application/json",
+            }.get(ext, "application/octet-stream")
+            with open(safe, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             mime + ("; charset=utf-8"
+                                     if mime.startswith("text") else ""))
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            pass  # silence per-request noise
+
+        def handle_one_request(self):
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+    return Handler
+
+def _derive_filename(file_unique_id: str, file_name: Optional[str],
+                     mime_type: Optional[str],
+                     file_type: Optional[str]) -> str:
+    """Best-effort filename with proper extension for downloads."""
+    # 1. file_name already has extension → use as-is
+    if file_name and os.path.splitext(file_name)[1]:
+        return file_name
+
+    ext_by_type = {
+        "photo": ".jpg", "sticker": ".webp", "animation": ".mp4",
+        "video": ".mp4", "video_note": ".mp4", "voice": ".ogg",
+        "audio": ".mp3", "document": ".bin",
+    }
+    ext_by_mime = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+        "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm",
+        "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/ogg": ".ogg",
+        "audio/x-wav": ".wav", "application/pdf": ".pdf",
+        "application/zip": ".zip",
+    }
+
+    ext = ""
+    if mime_type:
+        ext = ext_by_mime.get(mime_type, "")
+    if not ext:
+        ext = ext_by_type.get(file_type or "", ".bin")
+
+    base = file_name or f"{file_type or 'file'}_{file_unique_id}"
+    return os.path.splitext(base)[0] + ext
+
+def _web_poller_thread(bot: TelegramBot, interval: int, timeout: int,
+                       stop_event: threading.Event):
+    """Background poller: fetch getUpdates and store in tg.db while web UI runs."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        db_init(conn)
+        offset = int(db_state_get(conn, "offset", "0") or "0")
+        conn.close()
+    except Exception as e:
+        print(f"{Y}web poller: could not read offset: {e}{N}")
+        return
+
+    while not stop_event.is_set():
+        try:
+            resp = bot.get("getUpdates", params={
+                "offset": offset, "limit": 100, "timeout": timeout,
+                "allowed_updates": [
+                    "message", "edited_message",
+                    "channel_post", "edited_channel_post",
+                    "message_reaction", "message_reaction_count",
+                    "managed_bot",
+                ],
+            }, ask_retry=False)
+            if not resp or not resp.get("ok"):
+                stop_event.wait(interval)
+                continue
+
+            updates = resp.get("result", [])
+            if not updates:
+                continue
+
+            conn = sqlite3.connect(DB_FILE)
+            db_init(conn)
+            for upd in updates:
+                uid = upd.get("update_id", 0)
+                offset = uid + 1
+                if "message_reaction" in upd:
+                    _handle_reaction_update(conn, upd["message_reaction"])
+                    db_store_update(conn, uid, "message_reaction", upd)
+                    continue
+                if "message_reaction_count" in upd:
+                    _handle_reaction_count_update(
+                        conn, upd["message_reaction_count"])
+                    db_store_update(conn, uid, "message_reaction_count", upd)
+                    continue
+                kind, obj = None, None
+                for k in ("message", "edited_message",
+                          "channel_post", "edited_channel_post",
+                          "managed_bot"):
+                    if k in upd:
+                        kind, obj = k, upd[k]
+                        break
+                if obj is None:
+                    db_store_update(conn, uid, "non-message", upd)
+                    continue
+                if kind == "managed_bot":
+                    mb = obj
+                    db_store_update(conn, uid, "managed_bot", upd)
+                    print(f"\n{G}📢 New managed bot created!{N}")
+                    print(f"  Bot ID   : {mb.get('bot_id')}")
+                    print(f"  Username : @{mb.get('username')}")
+                    print(f"  Name     : {mb.get('name')}")
+                    print(f"  Owner ID : {mb.get('user_id')}")
+                    tok_resp = bot.get_managed_bot_token(mb.get('user_id'))
+                    if tok_resp and tok_resp.get("ok"):
+                        new_token = tok_resp.get("result")
+                        print(f"{G}✔ Token received: {new_token}{N}")
+                        try:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO managed_bots "
+                                "(bot_id, username, first_name, token, added_at, "
+                                " last_seen_at, updated_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
+                                 new_token, db_utcnow(), db_utcnow(), db_utcnow()))
+                            conn.commit()
+                        except Exception as e:
+                            print(f"{Y}⚠ Could not save to managed_bots: {e}{N}")
+                    continue
+                db_store_update(conn, uid, kind, upd)
+                _descr = db_process_message(conn, uid, kind, obj)
+                _record_mention_if_needed(conn, _descr, bot)
+            db_state_set(conn, "offset", offset)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            if stop_event.is_set():
+                break
+            print(f"{Y}web poller error: {e}{N}")
+            stop_event.wait(interval * 2)
+
+_web_poller_state = {"thread": None, "stop_event": None}
+
+def _start_web_poller(bot: TelegramBot, interval: int = 2,
+                      timeout: int = 30) -> bool:
+    if _web_poller_state["thread"] and _web_poller_state["thread"].is_alive():
+        return True
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=_web_poller_thread,
+        args=(bot, interval, timeout, stop_event),
+        daemon=True,
+        name="web-poller")
+    t.start()
+    _web_poller_state.update({"thread": t, "stop_event": stop_event})
+    return True
+
+def _stop_web_poller() -> bool:
+    if _web_poller_state["stop_event"]:
+        _web_poller_state["stop_event"].set()
+    _web_poller_state.update({"thread": None, "stop_event": None})
+    return True
+
+def _is_web_poller_running() -> bool:
+    t = _web_poller_state["thread"]
+    return bool(t and t.is_alive())
+
+# ================================================================
+#  User avatars (profile photos) — cached on disk
+# ================================================================
+_avatar_locks = {}
+_avatar_locks_guard = threading.Lock()
+
+
+def _get_avatar_lock(user_id):
+    with _avatar_locks_guard:
+        if user_id not in _avatar_locks:
+            _avatar_locks[user_id] = threading.Lock()
+        return _avatar_locks[user_id]
+
+
+def _fetch_user_photo(bot, user_id, cache_dir):
+    """Return (local_path, mime) for the user's current profile photo.
+       Fetches via getUserProfilePhotos -> getFile -> download (cached on disk).
+       Returns (None, None) if the user has no photo or the fetch fails."""
+    with _get_avatar_lock(user_id):
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT file_path FROM user_photos WHERE user_id = ?",
+                (user_id,)).fetchone()
+            if row and row[0] and os.path.isfile(row[0]):
+                return row[0], "image/jpeg"
+        finally:
+            conn.close()
+
+        resp = bot.post("getUserProfilePhotos",
+                        data={"user_id": str(user_id), "limit": "1"},
+                        ask_retry=False)
+        if not resp or not resp.get("ok"):
+            return None, None
+
+        photos = (resp.get("result") or {}).get("photos") or []
+        if not photos:
+            return None, None
+
+        largest = max(photos[0], key=lambda p: p.get("file_size", 0))
+        file_id = largest.get("file_id")
+        fuid = largest.get("file_unique_id") or "p"
+        if not file_id:
+            return None, None
+
+        f = bot.post("getFile", data={"file_id": file_id}, ask_retry=False)
+        if not f or not f.get("ok"):
+            return None, None
+        file_path = f["result"].get("file_path")
+        if not file_path:
+            return None, None
+
+        url = f"{bot.file_api}/{file_path}"
+        os.makedirs(cache_dir, exist_ok=True)
+        local = os.path.join(cache_dir, f"{user_id}_{fuid}.jpg")
+        tmp = local + ".part"
+        try:
+            r = bot.session.get(url, timeout=60, stream=True)
+            r.raise_for_status()
+            with open(tmp, "wb") as fh:
+                for chunk in r.iter_content(65536):
+                    fh.write(chunk)
+            os.replace(tmp, local)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return None, None
+
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO user_photos "
+                "(user_id, file_unique_id, file_id, file_path, file_size, "
+                " fetched_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, fuid, file_id, local,
+                 os.path.getsize(local),
+                 db_utcnow(), db_utcnow()))
+            conn.commit()
+        finally:
+            conn.close()
+        return local, "image/jpeg"
+
+
+
+
+# ================================================================
+#  Web helpers: multipart parsing + batched mentions
+# ================================================================
+def _parse_multipart(body: bytes, boundary: bytes):
+    """Very small multipart/form-data parser (text fields + file parts)."""
+    parts = {}
+    delimiter = b"--" + boundary
+    segments = body.split(delimiter)
+    for seg in segments:
+        if seg.startswith(b"\r\n"):
+            seg = seg[2:]
+        if seg.endswith(b"\r\n"):
+            seg = seg[:-2]
+        if not seg or seg in (b"--", b""):
+            continue
+        if b"\r\n\r\n" not in seg:
+            continue
+        hb, data = seg.split(b"\r\n\r\n", 1)
+        headers = {}
+        for line in hb.split(b"\r\n"):
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                headers[k.strip().lower().decode()] = v.strip().decode()
+        disp = headers.get("content-disposition", "")
+        nm = re.search(r'name="([^"]+)"', disp)
+        fm = re.search(r'filename="([^"]+)"', disp)
+        if not nm:
+            continue
+        name = nm.group(1)
+        if fm:
+            parts[name] = (fm.group(1), data,
+                           headers.get("content-type",
+                                       "application/octet-stream"))
+        else:
+            parts[name] = data.decode("utf-8", "replace")
+    return parts
+
+
+def _batch_mention(bot, chat_id, targets, header_text,
+                   reply_msg_id=None, batch_size=30):
+    """Send HTML <a tg://user> mentions in batches. Returns (ok, fail)."""
+    import html as _html
+    MAX_TEXT = 3800
+    batches, cur, cur_len = [], [], len(header_text) + 2 if header_text else 0
+    for m in targets:
+        uid = m["user_id"]
+        label = (f"@{m['username']}" if m.get("username")
+                 else (m.get("name") or str(uid)))
+        frag = f'<a href="tg://user?id={uid}">{_html.escape(label)}</a>'
+        if cur and (len(cur) >= batch_size
+                    or cur_len + len(frag) + 2 > MAX_TEXT):
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(frag)
+        cur_len += len(frag) + 2
+    if cur:
+        batches.append(cur)
+
+    ok = fail = 0
+    for batch in batches:
+        body = " ".join(batch)
+        if header_text:
+            body = f"{_html.escape(header_text)}\n\n{body}"
+        data = {"chat_id": str(chat_id), "text": body,
+                "parse_mode": "HTML"}
+        if reply_msg_id:
+            data["reply_to_message_id"] = str(reply_msg_id)
+        r = bot.post("sendMessage", data=data, ask_retry=False)
+        if r and r.get("ok"):
+            ok += 1
+            try:
+                from termgram import _persist_from_resp  # noqa
+            except Exception:
+                pass
+            try:
+                _persist_from_resp(r)
+            except Exception:
+                pass
+        else:
+            fail += 1
+    return ok, fail
+
+
+
+
+def _apply_reaction_delta(conn, chat_id, message_id, old_rx, new_rx):
+    """Update a message's raw_json reactions array to reflect a delta.
+       old_rx: list of {type,emoji} being removed (may be empty)
+       new_rx: list of {type,emoji} being added  (may be empty)
+       This keeps raw_json as the single source of truth for reactions."""
+    try:
+        row = conn.execute(
+            "SELECT raw_json FROM messages "
+            " WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id)).fetchone()
+        if not row or not row[0]:
+            return
+        payload = json.loads(row[0])
+        msg_obj = payload.get("message") or {}
+        rx_arr = msg_obj.get("reactions") or []
+
+        for old in (old_rx or []):
+            if isinstance(old, dict) and old.get("type") == "emoji":
+                emoji = old.get("emoji")
+                for r in rx_arr:
+                    rt = r.get("type") or {}
+                    if rt.get("type") == "emoji" and rt.get("emoji") == emoji:
+                        r["total_count"] = r.get("total_count", 1) - 1
+                        break
+
+        for new in (new_rx or []):
+            if isinstance(new, dict) and new.get("type") == "emoji":
+                emoji = new.get("emoji")
+                found = False
+                for r in rx_arr:
+                    rt = r.get("type") or {}
+                    if rt.get("type") == "emoji" and rt.get("emoji") == emoji:
+                        r["total_count"] = r.get("total_count", 0) + 1
+                        found = True
+                        break
+                if not found:
+                    rx_arr.append({
+                        "type": {"type": "emoji", "emoji": emoji},
+                        "total_count": 1
+                    })
+
+        rx_arr = [r for r in rx_arr if r.get("total_count", 0) > 0]
+        if rx_arr:
+            msg_obj["reactions"] = rx_arr
+        else:
+            msg_obj.pop("reactions", None)
+        payload["message"] = msg_obj
+
+        conn.execute(
+            "UPDATE messages SET raw_json = ?, updated_at = ? "
+            " WHERE chat_id = ? AND message_id = ?",
+            (json.dumps(payload, ensure_ascii=False), db_utcnow(),
+             chat_id, message_id))
+        conn.commit()
+    except Exception as e:
+        try:
+            print(f"warn: _apply_reaction_delta: {e}")
+        except Exception:
+            pass
+
+
+
+def _fetch_chat_photo(bot, chat_id, cache_dir):
+    """Return (local_path, mime) for a chat/group/channel photo (cached on disk)."""
+    with _get_avatar_lock(("chat", chat_id)):
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT file_path FROM chat_photos WHERE chat_id = ?",
+                (chat_id,)).fetchone()
+            if row and row[0] and os.path.isfile(row[0]):
+                return row[0], "image/jpeg"
+        finally:
+            conn.close()
+
+        resp = bot.post("getChat", data={"chat_id": str(chat_id)},
+                        ask_retry=False)
+        if not resp or not resp.get("ok"):
+            # Private chat without conversation history? try user photo
+            if str(chat_id).lstrip("-").isdigit() and not str(chat_id).startswith("-"):
+                try:
+                    return _fetch_user_photo(bot, int(chat_id), cache_dir)
+                except Exception:
+                    pass
+            return None, None
+
+        chat = resp.get("result") or {}
+        photo = chat.get("photo") or {}
+        if not photo:
+            # Private chat: getChat returns no photo sometimes; try user
+            if chat.get("type") == "private":
+                try:
+                    return _fetch_user_photo(bot, int(chat_id), cache_dir)
+                except Exception:
+                    pass
+            return None, None
+
+        file_id = photo.get("big_file_id") or photo.get("small_file_id")
+        fuid = (photo.get("big_file_unique_id")
+                or photo.get("small_file_unique_id") or "p")
+        if not file_id:
+            return None, None
+
+        f = bot.post("getFile", data={"file_id": file_id}, ask_retry=False)
+        if not f or not f.get("ok"):
+            return None, None
+        file_path = f["result"].get("file_path")
+        if not file_path:
+            return None, None
+
+        url = f"{bot.file_api}/{file_path}"
+        os.makedirs(cache_dir, exist_ok=True)
+        local = os.path.join(cache_dir, f"chat_{chat_id}_{fuid}.jpg")
+        tmp = local + ".part"
+        try:
+            r = bot.session.get(url, timeout=60, stream=True)
+            r.raise_for_status()
+            with open(tmp, "wb") as fh:
+                for chunk in r.iter_content(65536):
+                    fh.write(chunk)
+            os.replace(tmp, local)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return None, None
+
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO chat_photos "
+                "(chat_id, file_unique_id, file_id, file_path, file_size, "
+                " fetched_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, fuid, file_id, local,
+                 os.path.getsize(local),
+                 db_utcnow(), db_utcnow()))
+            conn.commit()
+        finally:
+            conn.close()
+        return local, "image/jpeg"
+
+
+
+
+def _serve_saved_media_preview(bot, row, cache_dir):
+    """Return bytes for a saved_media row's preview. Uses thumbnail if available."""
+    file_id = row.get("thumbnail_file_id") or row.get("file_id")
+    fuid = row.get("file_unique_id") or "x"
+    is_thumb = bool(row.get("thumbnail_file_id"))
+    cache_key = (f"thumb_{fuid}" if is_thumb else fuid)
+    cache_path = os.path.join(cache_dir, cache_key)
+
+    # 1. disk cache
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path, "rb") as fh:
+                return fh.read()
+        except Exception:
+            pass
+
+    # 2. try message_files / file_cache via unique id (may already be cached)
+    try:
+        _c = sqlite3.connect(DB_FILE)
+        _r = _c.execute(
+            "SELECT file_path FROM file_cache WHERE file_unique_id = ?",
+            (fuid,)).fetchone()
+        _c.close()
+        if _r and _r[0] and os.path.isfile(_r[0]):
+            try:
+                with open(_r[0], "rb") as fh:
+                    return fh.read()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3. download
+    resp = bot.post("getFile", data={"file_id": file_id}, ask_retry=False)
+    if not resp or not resp.get("ok"):
+        return None
+    fpath = resp["result"].get("file_path")
+    if not fpath:
+        return None
+    url = f"{bot.file_api}/{fpath}"
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = cache_path + ".part"
+    try:
+        r = bot.session.get(url, timeout=60, stream=True)
+        r.raise_for_status()
+        with open(tmp, "wb") as fh:
+            for ch in r.iter_content(65536):
+                fh.write(ch)
+        os.replace(tmp, cache_path)
+        with open(cache_path, "rb") as fh:
+            return fh.read()
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return None
+
+
+
+
+def _record_mention_if_needed(conn, descr, bot):
+    """After db_process_message, store a mention/reply flag if applicable."""
+    if not descr:
+        return
+    bot_id = getattr(bot, "bot_id", None)
+    if not bot_id:
+        return
+    if descr.get("from_id") == bot_id:
+        return  # never flag bot's own messages
+    bot_username = ((getattr(bot, "bot_info", None) or {})
+                    .get("username", "") or "")
+    kind = None
+    try:
+        if _check_mentioned(descr, bot_id, bot_username):
+            kind = "mention"
+    except Exception:
+        pass
+    if kind is None and descr.get("reply_to_message_id"):
+        try:
+            if _check_reply_to_bot(conn, descr["chat_id"],
+                                    descr["message_id"], bot_id):
+                kind = "reply"
+        except Exception:
+            pass
+    if not kind:
+        return
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO mention_flags "
+            "(chat_id, message_id, kind, from_user_id, created_at, seen) "
+            "VALUES (?, ?, ?, ?, ?, 0)",
+            (descr["chat_id"], descr["message_id"], kind,
+             descr.get("from_id"), db_utcnow()))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _run_web_server(bot: TelegramBot,
+                    host: str = "127.0.0.1", port: int = 8081,
+                    password: Optional[str] = None,
+                    session_ttl: int = 86400,
+                    cache_max_mb: int = 512,
+                    cert: Optional[str] = None,
+                    key: Optional[str] = None,
+                    disable_poller: bool = False):
+    """Start the web UI (browser client). CLI-only; Ctrl+C to stop."""
+
+    # Load bot identity — required by /api/me → state.botId (own-message detection)
+    if not bot.bot_info:
+        _me = bot.post("getMe", ask_retry=False)
+        if _me and _me.get("ok"):
+            bot.bot_info = _me["result"]
+            bot.bot_id = bot.bot_info.get("id")
+            print(f"{G}✔ Bot identity loaded: @{bot.bot_info.get('username')} "
+                  f"(id={bot.bot_info.get('id')}){N}")
+        else:
+            print(f"{R}✘ getMe failed — state.botId will be null, so you "
+                  f"won't see your own messages on the right side.{N}")
+
+    if not password:
+        password = bot.token
+        print(f"{Y}⚠ No --password given; using the bot token as web password.{N}")
+        print(f"{Y}  For safety, pass --password <separate-secret> instead.{N}")
+
+    if host == "0.0.0.0" and not cert:
+        print(f"{R}⚠ Binding to 0.0.0.0 without HTTPS — "
+              f"credentials would travel in plaintext.{N}")
+        if input("Continue anyway? [y/N]: ").strip().lower() != "y":
+            return
+
+    web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "web-ui")
+    if not os.path.isdir(web_dir):
+        print(f"{R}✘ web-ui/ directory not found next to termgram.py{N}")
+        return
+    if not os.path.isfile(os.path.join(web_dir, "index.html")):
+        print(f"{R}✘ web-ui/index.html not found{N}")
+        return
+
+    conn = sqlite3.connect(DB_FILE); db_init(conn); conn.close()
+
+    Handler = _make_web_handler(bot, password, session_ttl,
+                                cache_max_mb, web_dir)
+    try:
+        httpd = http.server.ThreadingHTTPServer((host, port), Handler)
+    except OSError as e:
+        print(f"{R}✘ Could not bind {host}:{port}: {e}{N}")
+        return
+
+    if cert and key:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+    proto = "https" if cert else "http"
+    print(f"{G}✔ Web UI listening on {proto}://{host}:{port}{N}")
+    print(f"  Login password: {'(bot token)' if password == bot.token else '(custom)'}")
+    print(f"  Session TTL   : {session_ttl}s")
+    print(f"  Cache max     : {cache_max_mb} MB")
+    print(f"  Press Ctrl+C to stop.\n")
+
+        # Poller is opt-in via the UI checkbox (/api/poller/start).
+    # It is NOT started here so users control when getUpdates runs.
+    stop_event = threading.Event()  # kept for compatibility, unused
+    if disable_poller:
+        print(f"{Y}ℹ Poller disabled by --no-poller.{N}\n")
+    else:
+        print(f"{Y}ℹ Poller idle — enable 'Sync & auto-refresh' "
+              f"in the web UI to start getUpdates.{N}\n")
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print(f"\n{Y}Stopping web server...{N}")
+    finally:
+        _stop_web_poller()
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+
+
 
 def run_cli(bot: TelegramBot, argv: List[str]) -> int:
     """Parse argv and execute a one-shot command. Return exit code."""
@@ -4582,6 +7228,24 @@ Examples:
 
     sub.add_parser("remove-photo", help="remove bot profile photo")
 
+    # ============ WEB UI ============
+    sp = sub.add_parser("web", help="start the web UI (browser client)")
+    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=8081)
+    sp.add_argument("--password", default=None,
+                    help="web login password (default: bot token)")
+    sp.add_argument("--session-ttl", type=int, default=86400,
+                    help="session TTL in seconds (default 86400)")
+    sp.add_argument("--cache-max-mb", type=int, default=512,
+                    help="max disk cache for files (default 512 MB)")
+    sp.add_argument("--https-cert", default=None,
+                    help="optional path to .pem certificate (enables HTTPS)")
+    sp.add_argument("--https-key", default=None,
+                    help="optional path to .pem private key")
+    sp.add_argument("--no-poller", action="store_true",
+                    help="don't poll getUpdates (if you run monitor "
+                         "or silent-fetch elsewhere)")
+
     # ============ FILES ============
     sp = sub.add_parser("download", help="download a file by file_id")
     sp.add_argument("file_id")
@@ -4599,6 +7263,21 @@ Examples:
     # ================================================================
     #  DISPATCH
     # ================================================================
+
+    # ---------- web UI ----------
+    if args.cmd == "web":
+        _run_web_server(
+            bot,
+            host=args.host,
+            port=args.port,
+            password=args.password,
+            session_ttl=args.session_ttl,
+            cache_max_mb=args.cache_max_mb,
+            cert=args.https_cert,
+            key=args.https_key,
+            disable_poller=getattr(args, "no_poller", False),
+        )
+        return 0
 
     # ---------- text ----------
     if args.cmd == "text":

@@ -33,3 +33,7 @@ opencode.json
 pic.jpg
 *.sh
 *.log
+
+# Web UI cache
+cache/
+*.bak.*
