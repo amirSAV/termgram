@@ -27,7 +27,7 @@ ENV/
 *.swp
 .DS_Store
 Thumbs.db
-
+.getupdates.lock
 # --- Personal / scratch ---
 opencode.json
 pic.jpg

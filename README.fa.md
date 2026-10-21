@@ -2,7 +2,14 @@
 
 > یک کلاینت ترمینالی (TUI + CLI) و کلاینت مرورگری برای **ربات‌های تلگرام** — ارسال، مدیریت، مانیتور، بریج، و حتی ساخت ربات‌های مدیریت‌شده، مستقیم از ترمینال یا مرورگر شما.
 
-`termgram` یک TUI تک‌فایلی و منو-محور است که با پایتون خالص نوشته شده. با **Bot API** تلگرام از طریق HTTPS (با `requests`) صحبت می‌کند و پشتیبانی از **پروکسی SOCKS5 / HTTP** را به‌صورت پیش‌فرض دارد (با `PySocks`). همه‌ی پیام‌های دریافتی در SQLite محلی ذخیره می‌شوند برای مرور بعدی. از v1.1.0 حالت **CLI غیرتعاملی** برای اسکریپت‌نویسی، از v1.2.0 **API Server** داخلی که می‌تواند نقش پروکسی/بریج کامل جلوی Telegram Bot API را بازی کند، و از **v1.3.0** یک **Web UI** کامل (کلاینت مرورگری) و پشتیبانی **Managed Bots** (ساخت و مدیریت ربات‌های دیگر از طریق یک deeplink قابل اشتراک) همراه این ابزار است.
+`termgram` یک TUI تک‌فایلی و منو-محور است که با پایتون خالص نوشته شده. با **Bot API** تلگرام از طریق HTTPS (با `requests`) صحبت می‌کند و پشتیبانی از **پروکسی SOCKS5 / HTTP** را به‌صورت پیش‌فرض دارد (با `PySocks`). همه‌ی پیام‌های دریافتی در SQLite محلی ذخیره می‌شوند برای مرور بعدی.
+
+**تاریخچه‌ی نسخه‌ها**
+
+- **v1.1.0** — حالت **CLI غیرتعاملی**
+- **v1.2.0** — **API Server** داخلی (پروکسی/بریج)
+- **v1.3.0** — **Web UI** کامل + **Managed Bots**
+- **v1.4.0** — **TUI ریسپانسیو**، **نوارهای پیشرفت درجا**، **قفل انحصاری `getUpdates`**، **منوی تنظیمات**، **مرورگر آهنگ‌های پروفایل**
 
 > 🌐 **English version:** [README.md](README.md)
 
@@ -17,13 +24,52 @@
 ### 🖥 چهار روش برای استفاده
 
 - **TUI تعاملی** — منوی شماره‌دار و پرامپت‌محور؛ ایده‌آل برای کشف دستی API.
-- **حالت CLI** — ساب‌کامندهای یک‌باره برای اسکریپت‌نویسی، cron، یا ارسال سریع از شل. `python3 termgram.py --help` را ببینید.
-- **API Server** — یک بریج HTTP داخلی (منوی **52**) که روی `host:port` با توکن مستقل گوش می‌دهد و درخواست‌های `/bot<token>/<method>` را به Telegram Bot API واقعی پروکسی می‌کند. پاسخ‌های `getUpdates` **قبل از** بازگشت به فراخواننده در `tg.db` ذخیره می‌شوند.
-- **Web UI** — کلاینت مرورگری با دیوار ورود، لیست چت، نمایش پیام، واکنش‌ها، مدیای ذخیره‌شده (استیکر/انیمیشن)، جست‌وجوی اعضا، ارسال گروهی منشن، آپلود فایل، و پولر پس‌زمینه‌ی اختیاری که `tg.db` را تازه نگه می‌دارد. اجرا با `python3 termgram.py web` (پایین‌تر توضیح داده شده).
+- **حالت CLI** — ساب‌کامندهای یک‌باره برای اسکریپت‌نویسی، cron، یا ارسال سریع.
+- **API Server** — یک بریج HTTP داخلی (تنظیمات → API server) که روی `host:port` گوش می‌دهد و درخواست‌های `/bot<token>/<method>` را به Telegram Bot API واقعی پروکسی می‌کند.
+- **Web UI** — کلاینت مرورگری با دیوار ورود، لیست چت، نمایش پیام، واکنش‌ها، مدیای ذخیره‌شده، جست‌وجوی اعضا، ارسال گروهی منشن، آپلود فایل، و پولر پس‌زمینه‌ی اختیاری.
+
+### 🎨 TUI ریسپانسیو با انیمیشن دو مرحله‌ای
+
+منوی تعاملی با عرض ترمینال شما سازگار می‌شود: **۱ تا ۵ ستون**، که هر بار رندر مجدد محاسبه می‌شود. چه در یک نشست SSH با ۸۰ ستون باشید چه یک نمایشگر عریض با ۲۴۰ ستون، همه چیز تمیز جا می‌گیرد.
+
+- خط **تیتر** با افکت typewriter ظاهر می‌شود.
+- **سطرهای منو** یکی‌یکی fade-in می‌شوند — به‌قدری سریع که فوری حس شود، به‌قدری نرم که پرش نباشد.
+- سرعت از طریق `MENU_SPEED` در `config.json` قابل تنظیم است: `off` · `fast` (پیش‌فرض) · `normal` · `slow`.
+- صفحه (شامل **تاریخچه‌ی scrollback**) قبل از هر رندر با `\033[H\033[2J\033[3J` پاک می‌شود.
+- با **Enter روی پرامپت خالی** منو دوباره بارگذاری می‌شود.
+- بعد از هر اقدام، برنامه با `Press Enter to return to main menu...` توقف می‌کند قبل از رندر مجدد.
+
+### 📊 نوارهای پیشرفت درجا
+
+هر دانلود و آپلود یک نوار تک‌خطی زنده نشان می‌دهد که خودش را بازنویسی می‌کند:
+
+```
+⬇ [████████████░░░░░░░░░░░░░░░░░░░░]  38.4%  1.8MB/4.7MB  420.5KB/s ETA 7s
+```
+
+- عرض تطبیقی بر اساس اندازه‌ی ترمینال.
+- **حجم انجام‌شده / کل**، **سرعت**، و **ETA** — یا یک spinner وقتی سرور `Content-Length` برنمی‌گرداند.
+- به‌طور خودکار **وقتی stdout یک TTY نیست غیرفعال** می‌شود (امن برای pipe و redirect).
+- فعال برای: دانلود فایل از منوی تعاملی (گزینه ۳۷)، دانلود آهنگ پروفایل (گزینه ۶۰)، `download`/`upload` در CLI، و جریان‌های `send_*`.
+
+### 🔒 قفل انحصاری `getUpdates` (به سبک apt)
+
+تلگرام اجازه می‌دهد **فقط یک `getUpdates` فعال به ازای هر بات** داشته باشید. `termgram` این را با یک قفل cross-platform مبتنی بر `flock` (`.getupdates.lock`) اعمال می‌کند:
+
+- **Monitor mode**، **Silent fetch**، **پولر پس‌زمینه‌ی Web UI**، و **API Server** هر کدام قفل را هنگام نیاز می‌گیرند.
+- اگر یکی از قبل در حال اجرا باشد، بقیه سریع با پیام روشن شکست می‌خورند:
+
+  ```
+  ✘ Cannot start Monitor Mode
+    ✘ getUpdates lock held by: api-server (pid 12345, age 8s)
+  ```
+
+- فایل قفل **روی دیسک باقی می‌ماند** — OS خودِ `flock` را هنگام خروج یا کرش آزاد می‌کند، پس قفل کهنه غیرممکن است. هرگز دستی پاکش نکن مگر اینکه فایل خراب شده باشد.
+- `acquire_getupdates_lock()` و `release_getupdates_lock()` برای اسکریپت‌ها export شده‌اند.
 
 ### 🔗 دکمه‌های URL درون‌خطی
 
-زیر هر پیامی که می‌فرستید می‌توانید **دکمه‌های کیبورد درون‌خطی** بگذارید. دکمه‌ها سطر به سطر چیده می‌شوند؛ هر سطر می‌تواند یک یا چند دکمه‌ی URL داشته باشد. بعد از انتخاب محتوا در هر جریان `send_*`، `termgram` می‌پرسد که آیا می‌خواهید دکمه اضافه کنید — برای هر دکمه یک برچسب و یک URL وارد کنید.
+زیر هر پیامی که می‌فرستید می‌توانید **دکمه‌های کیبورد درون‌خطی** بگذارید. دکمه‌ها سطر به سطر چیده می‌شوند.
 
 ```
 Row 1 — number of buttons: 2
@@ -34,11 +80,11 @@ Row 2 — number of buttons: 1
 Row 3 — number of buttons:            ← empty = finish
 ```
 
-> ⚠️ `sendVideoNote` از دکمه پشتیبانی **نمی‌کند** (محدودیت Telegram API)، پس آن جریان پرامپت دکمه را رد می‌کند.
+> ⚠️ `sendVideoNote` از دکمه پشتیبانی **نمی‌کند** (محدودیت Telegram API).
 
-### 💬 Quote-reply (reply_parameters)
+### 💬 Quote-reply (پاسخ نقل‌قولی)
 
-به یک **بخش مشخص** از یک پیام موجود پاسخ دهید با استفاده از `reply_parameters.quote`. هر جریان ارسال از طریق پرامپت مشترک حالا می‌پرسد:
+به یک **بخش مشخص** از یک پیام موجود پاسخ دهید با استفاده از `reply_parameters.quote`:
 
 ```
 reply_to_message_id (empty = no reply): 12913
@@ -47,11 +93,11 @@ reply_to_message_id (empty = no reply): 12913
   ↳ quote text (must be an exact substring of the original): hello world
 ```
 
-همین رفتار در TUI، حالت مانیتور (دستور `r`)، Web UI و CLI (`--quote "..."`) یکسان است. نقل‌قول **باید دقیقاً یک زیررشته‌ی** متن/کپشن پیام منبع باشد، وگرنه تلگرام `QUOTE_TEXT_INVALID` برمی‌گرداند.
+همین رفتار در TUI، حالت مانیتور (دستور `r`)، Web UI، و CLI (`--quote "..."`) یکسان است. نقل‌قول **باید دقیقاً یک زیررشته‌ی** متن/کپشن پیام منبع باشد، وگرنه تلگرام `QUOTE_TEXT_INVALID` برمی‌گرداند.
 
 ### 🔀 پاسخ بین‌چتی — بومی، بدون copy
 
-پاسخ به پیامی که در **چت دیگری** قرار دارد کاملاً بومی شده. `termgram` از `reply_parameters` تلگرام با `chat_id` جاسازی‌شده استفاده می‌کند:
+پاسخ به پیامی که در **چت دیگری** قرار دارد کاملاً بومی است، با `reply_parameters` و `chat_id` جاسازی‌شده:
 
 ```json
 {
@@ -63,55 +109,48 @@ reply_to_message_id (empty = no reply): 12913
 }
 ```
 
-دیگر خبری از رفت‌وبرگشت `copyMessage` نیست. پاسخ **مستقیماً زیر پیام اصلی** نمایش داده می‌شود، حتی بین چت‌ها. اگر چت مبدأ و مقصد یکی باشد، برای سادگی از `reply_to_message_id` استفاده می‌شود.
+پاسخ **مستقیماً زیر پیام اصلی** نمایش داده می‌شود، حتی بین چت‌ها.
 
-- **TUI:** هر جریان ارسال (متن، عکس، تاس، …) — پرامپت `reply_to_message_id` حالا شاخه‌ی بین‌چتی هم دارد.
-- **CLI:** `--reply-to <id> --reply-to-chat <chat> [--quote "..."]`، یا ساب‌کامند اختصاصی `reply`.
-
-> ⚠️ تلگرام پاسخ بین‌چتی را فقط وقتی می‌پذیرد که ربات به پیام مبدأ دسترسی داشته باشد (عضو چت مبدأ باشد، یا پیام مبدأ توسط خود ربات یا ربات دیگری با دسترسی مشترک نوشته شده باشد). در غیر این صورت `MESSAGE_TO_BE_REPLIED_NOT_FOUND` می‌گیرید.
+> ⚠️ تلگرام پاسخ بین‌چتی را فقط وقتی می‌پذیرد که ربات به پیام مبدأ دسترسی داشته باشد. در غیر این صورت `MESSAGE_TO_BE_REPLIED_NOT_FOUND` می‌گیرید.
 
 ### 💬 واکنش‌های سفارشی
 
-`termgram` مجموعه‌ی **۶۱ واکنش استاندارد تلگرام** (👍 ❤️ 🔥 …) را در `config.json` همراه دارد. واکنش‌ها را می‌توانید به‌صورت تعاملی از طریق **منوی 51) Manage reactions** (لیست، افزودن، حذف، یا بازنشانی به واکنش‌های استاندارد تلگرام) مدیریت کنید، یا مستقیماً `config.json` را ویرایش کنید.
-
-واکنش‌ها به‌صورت JSON تمیز ساختار یافته‌اند:
+`termgram` مجموعه‌ی **۶۱ واکنش استاندارد تلگرام** را در `config.json` همراه دارد. از **تنظیمات → Manage reactions** (منوی 54 → 4) مدیریت کنید:
 
 ```json
-{
-  "emoji": "👍",
-  "label": "Thumbs Up"
-}
+{ "emoji": "👍", "label": "Thumbs Up" }
 ```
 
 - فیلد `emoji` به تلگرام ارسال می‌شود.
 - فیلد `label` توضیح نمایشی در انتخاب‌گر است.
 - تغییرات ذخیره‌شده در `config.json` بدون ری‌استارت دوباره بارگذاری می‌شوند.
 
-در **Web UI**، استفاده‌ی واکنش‌ها در جدول `reaction_usage` ذخیره می‌شود، بنابراین پرکاربردترین ایموجی‌ها اول نمایش داده می‌شوند.
+در **Web UI**، استفاده‌ی واکنش‌ها در جدول `reaction_usage` ذخیره می‌شود.
 
 ### 🔑 مدیریت توکن ربات و اعتبارسنجی سرور
 
-هر زمان خواستید توکن ربات را از طریق **منوی 50) Manage bot token** مدیریت کنید:
-- نمایش توکن ماسک‌شده یا کامل.
-- به‌روزرسانی توکن با اعتبارسنجی فوری Telegram API (`getMe`).
-- تست اتصال و هویت بدون خروج از کلاینت.
-- تنظیم **Base URL سفارشی** (برای استفاده پشت یک پروکسی API خود-میزبان).
+مدیریت توکن از **تنظیمات → Manage bot token** (منوی 54 → 3):
 
-هنگام راه‌اندازی، `termgram` توکن شما را مستقیماً با سرورهای تلگرام اعتبارسنجی می‌کند. اگر توکن نامعتبر یا خالی باشد، فوراً هشدار می‌دهد (پاسخ `401 Unauthorized` تلگرام را تأیید می‌کند) و از شما توکن معتبر، Base URL سفارشی، یا خروج تمیز می‌خواهد.
+- نمایش توکن ماسک‌شده یا کامل.
+- به‌روزرسانی با اعتبارسنجی فوری Telegram API (`getMe`).
+- تست اتصال بدون خروج از کلاینت.
+- تنظیم **Base URL سفارشی** (از تنظیمات → Set Base URL).
+
+هنگام راه‌اندازی، `termgram` توکن شما را اعتبارسنجی می‌کند. اگر نامعتبر باشد، پرامپت توکن معتبر، Base URL سفارشی، پروکسی، یا خروج می‌دهد.
 
 ### 🌐 Base URL سفارشی
 
-اگر `api.telegram.org` مسدود است (یا می‌خواهید ترافیک را از بریج خودتان بفرستید)، آدرس ریشه‌ی سفارشی را از **منوی 50 → 4**، از پرامپت خطای راه‌اندازی، یا مستقیماً در `config.json` تنظیم کنید:
+اگر `api.telegram.org` مسدود است، از **تنظیمات → Set Base URL** (منوی 54 → 2)، از پرامپت خطا، یا در `config.json` تنظیم کنید:
 
 ```json
 { "base_url": "https://tg-bridge.example.com" }
 ```
 
-سپس `termgram` فراخوانی‌ها را به `https://tg-bridge.example.com/bot<token>/<method>` می‌فرستد. خالی گذاشتن `base_url` به endpoint پیش‌فرض تلگرام بازمی‌گردد.
+سپس فراخوانی‌ها به `https://tg-bridge.example.com/bot<token>/<method>` می‌روند. خالی = endpoint پیش‌فرض.
 
 ### 🛡 راه‌اندازی بدون کرش
 
-حتی اگر `termgram.py` را به‌تنهایی در یک پوشه‌ی خالی اجرا کنید، به‌طور خودکار `config.json` را می‌سازد و اسکیمای SQLite `tg.db` را بدون کرش یا خطای فایل‌گم‌شده مقداردهی می‌کند.
+حتی اگر `termgram.py` را در یک پوشه‌ی خالی اجرا کنید، به‌طور خودکار `config.json` را می‌سازد و اسکیمای `tg.db` را بدون کرش مقداردهی می‌کند.
 
 ### 🤖 پروفایل ربات
 
@@ -121,32 +160,53 @@ reply_to_message_id (empty = no reply): 12913
 - **`getMyName`** — نام نمایشی سراسری (Bot API 9.0+)
 - **`getMyDescription`** — بیوگرافی صفحه‌ی پروفایل
 - **`getMyShortDescription`** — متن کوتاه نمایش در چت‌های اشتراکی
-- **`getUserProfilePhotos`** — مجموعه‌ی عکس پروفایل فعلی
+- **`getUserProfilePhotos`** — مجموعه‌ی عکس پروفایل
 
-و طبیعتاً می‌توانید همه را **تغییر** دهید:
+و همه را **تغییر** دهید:
 
-تنظیم نام · تنظیم بیو (description) · تنظیم بیوی کوتاه · تنظیم / حذف عکس پروفایل
+تنظیم نام · تنظیم بیو · تنظیم بیوی کوتاه · تنظیم / حذف عکس پروفایل
 
-- **TUI:** منوی **49) Get current profile**
+- **TUI:** منوی **36) Get current profile**
 - **CLI:** `python3 termgram.py profile`
 
-جریان **تنظیم عکس پروفایل** (منوی 35) از عکس **استاتیک** (JPG/PNG، پیشنهاد 512×512) و **انیمیشن** (MP4) از طریق `setMyProfilePhoto` پشتیبانی می‌کند.
+جریان **تنظیم عکس پروفایل** (منوی 34) از **استاتیک** (JPG/PNG، پیشنهاد 512×512) و **انیمیشن** (MP4) از طریق `setMyProfilePhoto` پشتیبانی می‌کند.
 
 ### 👤 اطلاعات حساب کاربر
 
-هر پروفایل عمومی کاربر را با **منوی 59** ببینید:
+هر پروفایل عمومی کاربر را با **منوی 50** ببینید:
 
 - **`getUserProfilePhotos`** — آخرین عکس پروفایل + `file_id` بزرگ‌ترین سایز
 - **`getUserProfileAudios`** — آهنگ‌های پروفایل کاربر (Bot API 7.0+)
-- **`getChat`** — اطلاعات عمومی حساب (فقط اگر ربات چت خصوصی با کاربر داشته باشد)
+- **`getChat`** — اطلاعات عمومی حساب (اگر ربات چت خصوصی با کاربر داشته باشد)
 
-حداقلی و هدفمند — فقط ضروری‌ها، بدون شلوغی.
+### 🎵 مرورگر آهنگ‌های پروفایل
+
+یک **منوی اختصاصی برای آهنگ‌های پروفایل کاربر** (منوی **60**، یا از طریق **50**) با دانلودر داخلی:
+
+```
+--- 3 profile audio(s) ---
+    1) 🎵 Love Story — Taylor Swift
+         duration=235s  size=3520123B
+    2) 🎵 Blinding Lights — The Weeknd
+         duration=200s  size=2988771B
+    3) 🎵 Shape of You — Ed Sheeran
+         duration=233s  size=3412345B
+
+  type a number to download that song
+  a) Download all   j) Export JSON   0) Back
+```
+
+- پوشه‌ی خروجی **یک بار در هر نشست** پرسیده می‌شود.
+- یک **شماره آهنگ** بزنید تا مستقیم دانلود شود. بعد از هر دانلود، لیست دوباره کشیده می‌شود، پس می‌توانید چند آهنگ پشت‌سرهم بگیرید.
+- **`a`** — همه را دانلود کن، با پیشرفت هر فایل و خلاصه‌ی نهایی.
+- **`j`** — متادیتای خام `getUserProfileAudios` را در یک فایل JSON ذخیره می‌کند.
+- از همان نوار پیشرفت درجای بقیه‌ی برنامه استفاده می‌کند.
 
 ### 🛠 مدیریت پیام
 
-ویرایش · حذف (تکی **یا** بازه‌ای) · سنجاق · برداشتن سنجاق · فوروارد · اکشن‌های چت (تایپ / آپلود)
+ویرایش · حذف (تکی **یا** بازه‌ای) · سنجاق · برداشتن سنجاق · فوروارد · اکشن‌های چت
 
-**حذف بازه‌ای** — یک `chat_id` از DB (یا دستی) انتخاب کنید و بازه‌ی `from → to` از `message_id` را بدهید. `termgram` برای هر شناسه یک `deleteMessage` می‌فرستد، flood-control (`429 retry_after`) را رعایت می‌کند و خلاصه‌ی کامل می‌دهد:
+**حذف بازه‌ای** — یک `chat_id` از DB انتخاب کنید و بازه‌ی `from → to` بدهید. flood-control (`429 retry_after`) را رعایت می‌کند و خلاصه‌ی کامل می‌دهد:
 
 ```
 ============================================
@@ -162,17 +222,17 @@ reply_to_message_id (empty = no reply): 12913
 
 ### 💾 مدیریت پایگاه داده‌ی محلی
 
-همه‌ی پیام‌های دریافتی در `tg.db` ذخیره می‌شوند. برای سبک نگه داشتن آن، **منوی 54** این گزینه‌ها را دارد:
+همه‌ی پیام‌های دریافتی در `tg.db`. **منوی 53**:
 
 1. پاک‌سازی **چت خاص** (از DB)
 2. پاک‌سازی **بر اساس نوع چت** (private / group / supergroup / channel)
 3. پاک‌سازی **بر اساس بازه‌ی تاریخ** (unix ts)
-4. پاک‌سازی **بر اساس بازه‌ی message_id** داخل یک چت (از DB)
+4. پاک‌سازی **بر اساس بازه‌ی message_id** داخل یک چت
 5. **پاک‌سازی یتیم‌ها** — ردیف‌های `entities` / `chat_users` بدون پیام
 
 ### 👥 اعضای چت (از DB)
 
-**منوی 57** همه‌ی اعضای شناخته‌شده‌ی یک گروه/سوپرگروه را که از پیام‌های دریافتی تجمیع شده‌اند (`chat_users`) نشان می‌دهد:
+**منوی 48** همه‌ی اعضای شناخته‌شده‌ی یک گروه/سوپرگروه را نشان می‌دهد:
 
 ```
 --- Members of chat -1001234567890 (12) ---
@@ -181,40 +241,42 @@ reply_to_message_id (empty = no reply): 12913
   d) Delete one   r) Reset all   e) Export JSON   0) Back
 ```
 
-- `d` — حذف یک کاربر از لیست DB (او را از گروه واقعی **بیرون نمی‌کند**)
-- `r` — بازنشانی کل لیست اعضا برای آن چت
+- `d` — حذف یک کاربر از لیست DB (او را از گروه **بیرون نمی‌کند**)
+- `r` — بازنشانی کل لیست
 - `e` — خروجی به `members_<chat>_<ts>.json`
+
+> ⚠️ **اعضا فقط از پیام‌های دریافتی جمع‌آوری می‌شوند.** کاربرانی که هرگز پیامی نفرستاده‌اند در لیست نیستند. تلگرام لیست کامل اعضا را به بات‌ها نمی‌دهد.
 
 ### 📣 منشن گروهی اعضا
 
-**منوی 58** به شما اجازه می‌دهد اعضا را از DB @-منشن کنید:
+**منوی 49** @-منشن اعضا از DB:
 
-- **همه‌ی اعضا** یا **لیست سفارشی** (`123, @ali, 456` — شناسه و یوزرنیم ترکیبی)
-- تقسیم خودکار به چند پیام بر اساس **اندازه‌ی دسته** (پیش‌فرض ۳۰) و **محدودیت کاراکتر** (۳۸۰۰)
+- **همه‌ی اعضا** یا **لیست سفارشی** (`123, @ali, 456` — ترکیبی)
+- تقسیم خودکار بر اساس **اندازه‌ی دسته** (پیش‌فرض ۳۰) و **محدودیت کاراکتر** (۳۸۰۰)
 - از HTML `<a href="tg://user?id=...">` استفاده می‌کند تا برای کاربران بدون یوزرنیم هم کار کند
 - متن سرصفحه‌ی اختیاری، پاسخ اختیاری (با پشتیبانی پاسخ بین‌چتی)
 - خلاصه در پایان: تعداد اعضای منشن‌شده / پیام‌های ارسالی / خطاها
 
-**Web UI** همین گروه‌بندی را از طریق `POST /api/chats/<id>/mention` با `{text, all, user_ids, batch_size, reply_to}` ارائه می‌دهد.
+**Web UI** همین را از طریق `POST /api/chats/<id>/mention` ارائه می‌دهد.
 
 ### 🧭 قفل chat_id
 
-**منوی 55** یک `chat_id` را سراسری پین می‌کند. پس از قفل شدن:
-- هر پرامپتی که `chat_id` می‌خواهد (ارسال، ویرایش، حذف، فوروارد، سنجاق، …) بی‌صدا از مقدار قفل استفاده می‌کند.
-- قفل فعلی در بالای منوی اصلی نمایش داده می‌شود: `Locked chat_id: -1001   Guest: OFF   API: OFF`
+**تنظیمات → Lock / Unlock chat_id** (منوی 54 → 5) یک `chat_id` را سراسری پین می‌کند:
+
+- هر پرامپتی که `chat_id` می‌خواهد بی‌صدا از مقدار قفل استفاده می‌کند.
+- قفل فعلی در بالای منوی اصلی: `Locked chat_id: -1001   Guest: OFF   API: OFF`
 - دستی قفل کنید، از DB انتخاب کنید، یا پاک کنید.
 
 ### 👻 حالت Guest در مانیتور
 
-**منوی 56** مانیتور را به فیلتر **فقط guest-chat** تغییر می‌دهد. فقط پیام‌هایی که از طریق business connection / guest bot می‌آیند (تشخیص با `business_connection_id`، `sender_business_bot`، `via_bot`، `sender_boost_count`) نمایش داده می‌شوند؛ بقیه بی‌صدا ذخیره اما پنهان می‌شوند. وضعیت در هدر منو به‌صورت `Guest: ON` / `Guest: OFF` دیده می‌شود.
+**تنظیمات → Toggle guest chat mode** (منوی 54 → 6) مانیتور را به فیلتر **فقط guest-chat** تغییر می‌دهد. فقط پیام‌هایی که از طریق business connection / guest bot می‌آیند (تشخیص با `business_connection_id`، `sender_business_bot`، `via_bot`، `sender_boost_count`) نمایش داده می‌شوند. وضعیت در هدر: `Guest: ON` / `Guest: OFF`.
 
 ### 📡 تشخیص منشن/پاسخ در Silent Fetch
 
-وقتی یک اجرای `Silent fetch` تمام می‌شود، `termgram` همه‌ی پیام‌های ذخیره‌شده را برای این‌ها اسکن می‌کند:
-- **@-منشن‌های ربات** (از طریق entityهای تلگرام یا متن `@username`)
-- **پاسخ‌ها به پیام‌های خود ربات**
+وقتی یک `Silent fetch` تمام می‌شود، `termgram` همه‌ی پیام‌ها را برای این‌ها اسکن می‌کند:
 
-در پایان گزارش می‌دهد:
+- **@-منشن‌های ربات** (از entityها یا `@username`)
+- **پاسخ‌ها به پیام‌های خود ربات**
 
 ```
 =======================================================
@@ -231,43 +293,41 @@ reply_to_message_id (empty = no reply): 12913
 =======================================================
 ```
 
-انتخاب `y` هر پیام را باز می‌کند و اجازه‌ی پاسخ درجا می‌دهد — بدون نیاز به برگشت به مانیتور.
-
-**Web UI** این‌ها را در `mention_flags` ذخیره می‌کند و یک بج «Unseen mentions» در نوار کنار نشان می‌دهد.
+انتخاب `y` هر پیام را باز می‌کند و اجازه‌ی پاسخ درجا می‌دهد. **Web UI** این‌ها را در `mention_flags` ذخیره می‌کند و یک بج **Unseen mentions** نشان می‌دهد.
 
 ### 🤖 حالت مدیریت ربات (رجیستری محلی)
 
-**منوی 53** یک رجیستری محلی از همه‌ی ربات‌هایی که مدیریت می‌کنید نگه می‌دارد:
+**منوی 51** یک رجیستری محلی:
 
 - لیست هر ربات مدیریت‌شده با id، username، `added_at`، `last_seen_at`
 - مشاهده‌ی توکن ذخیره‌شده
-- مشاهده / بررسی مجوزهای ذخیره‌شده در هر چت
-- حذف ردیف یک ربات (و ردیف‌های مجوزش) از DB
-- **افزودن ربات جدید** — یک deeplink قابل اشتراک تولید می‌کند (ببینید Managed Bots در پایین)
+- مشاهده / بررسی مجوزها
+- حذف ردیف یک ربات (و مجوزهایش)
+- **افزودن ربات جدید** — یک deeplink قابل اشتراک تولید می‌کند
 
 ### 🆕 Managed Bots (Bot API 9.6+)
 
-از v1.3.0، `termgram` از قابلیت **Managed Bots** تلگرام پشتیبانی می‌کند. رباتی با فلگ `can_manage_bots` (فعال‌شده از طریق **Bot Management Mode** در `@BotFather`) می‌تواند از طرف کاربران ربات‌های دیگر بسازد و مدیریت کند — **بدون نیاز به باز کردن `@BotFather`**.
+`termgram` از قابلیت **Managed Bots** تلگرام پشتیبانی می‌کند. رباتی با `can_manage_bots: true` (فعال‌شده از طریق **Bot Management Mode** در `@BotFather`) می‌تواند ربات‌های دیگر بسازد و مدیریت کند — **بدون نیاز به باز کردن `@BotFather`**.
 
 **چطور کار می‌کند**
 
-1. **منوی 60) Managed bot link** — یا **منوی 53 → a** — یک لینک قابل اشتراک تولید می‌کند:
+1. **منوی 52) Managed bot link** — یا **51 → a** — یک لینک قابل اشتراک تولید می‌کند:
    ```
    https://t.me/newbot/<manager_bot_username>/<suggested_username>?name=<suggested_display_name>
    ```
-   لینک **به‌صورت محلی** ساخته می‌شود (بدون تماس API) با `urllib.parse.quote`.
+   ساخته‌شده **به‌صورت محلی** با `urllib.parse.quote`.
 
-2. این لینک را برای کاربری بفرستید. او در اپ تلگرام باز می‌کند، تأیید می‌کند، و ربات جدیدی تحت ربات مدیر شما ساخته می‌شود.
+2. لینک را برای کاربر بفرستید. در اپ تلگرام باز می‌کند، تأیید می‌کند، ربات جدید زیر ربات مدیر شما ساخته می‌شود.
 
-3. تلگرام یک **`updateManagedBot`** برای ربات مدیر شما می‌فرستد. `termgram` آن را در **هر چهار حلقه‌ی دریافت** (Silent fetch، Monitor، Web UI poller، API Server) پردازش می‌کند و به‌صورت خودکار:
-   - id، username، name، و owner ربات جدید را چاپ می‌کند
-   - `getManagedBotToken` را فراخوانی می‌کند تا توکن را بگیرد
-   - ربات جدید را در `managed_bots` ذخیره می‌کند
+3. تلگرام `updateManagedBot` برای ربات مدیر می‌فرستد. `termgram` آن را در **هر چهار حلقه‌ی دریافت** پردازش می‌کند و به‌طور خودکار:
+   - id، username، name، و owner را چاپ می‌کند
+   - `getManagedBotToken` را صدا می‌زند تا توکن را بگیرد
+   - ربات را در `managed_bots` ذخیره می‌کند
 
-4. از **منوی 53 → انتخاب ربات** مدیریتش کنید:
+4. مدیریت از **منوی 51 → انتخاب ربات**:
    - **`getManagedBotToken`** — دریافت/به‌روزرسانی توکن
-   - **`replaceManagedBotToken`** — چرخش توکن (توکن قبلی باطل می‌شود)
-   - **`bots.getAccessSettings`** / **`bots.editAccessSettings`** — مشاهده یا تغییر مجموعه‌ی مجوزهای ربات
+   - **`replaceManagedBotToken`** — چرخش توکن
+   - **`bots.getAccessSettings`** / **`bots.editAccessSettings`** — مشاهده یا تغییر مجوزها
    - **`bots.exportBotToken`** — خروجی توکن در سطح MTProto
 
 **متدهای API پشتیبانی‌شده**
@@ -281,26 +341,30 @@ reply_to_message_id (empty = no reply): 12913
 | `bots.getAccessSettings` | خواندن مجموعه‌ی دسترسی |
 | `bots.editAccessSettings` | به‌روزرسانی مجموعه‌ی دسترسی |
 | `bots.exportBotToken` | خروجی توکن MTProto |
-| `updateManagedBot` | نوع آپدیت دریافتی در ساخت / تغییر |
+| `updateManagedBot` | نوع آپدیت دریافتی |
 
-> 💡 **توجه:** `bots.createBot` یک متد MTProto است و **هرگز** مستقیماً توسط `termgram` فراخوانی نمی‌شود. ساخت ربات همیشه **سمت کلاینت** اتفاق می‌افتد وقتی کاربر deeplink را در اپ تلگرام باز می‌کند. `termgram` فقط لینک را تولید می‌کند و به `updateManagedBot` حاصل واکنش می‌دهد — دقیقاً همان‌طور که تلگرام در نظر گرفته.
+> 💡 **توجه:** `bots.createBot` یک متد MTProto است و **هرگز** مستقیماً توسط `termgram` فراخوانی نمی‌شود. ساخت ربات همیشه **سمت کلاینت** اتفاق می‌افتد وقتی کاربر deeplink را باز می‌کند.
 
-> ⚠️ **پیش‌نیاز:** **Bot Management Mode** را در `@BotFather` برای ربات مدیر خود فعال کنید. در غیر این صورت `getMe` مقدار `can_manage_bots: false` برمی‌گرداند و همه‌ی فراخوانی‌های Managed Bot شکست می‌خورند.
+> ⚠️ **پیش‌نیاز:** **Bot Management Mode** را در `@BotFather` فعال کنید.
 
 ### 🛰 API Server (بریج / پروکسی)
 
-**منوی 52** یک HTTP server خودکفا راه می‌اندازد که مثل `api.telegram.org` رفتار می‌کند:
+**تنظیمات → API server** (منوی **54 → 7**) یک HTTP server خودکفا راه می‌اندازد که مثل `api.telegram.org` رفتار می‌کند:
 
 - روی `api_server_host:api_server_port` گوش می‌دهد (پیش‌فرض `127.0.0.1:8080`)
-- فراخوانی‌ها را در `/bot<token>/<method>` می‌پذیرد
-- از `api_server_token` در `config.json` استفاده می‌کند، یا به توکن ربات فعال برمی‌گردد
-- هر درخواست را به Bot API بالادست فوروارد می‌کند (از طریق `PROXY` / `HTTPS_PROXY` اگر تنظیم شده باشد)
-- **هر پاسخ `getUpdates` را** در `tg.db` (پیام‌ها، ویرایش‌ها، فایل‌ها، واکنش‌ها، entityها) **قبل از** بازگشت به فراخواننده ذخیره می‌کند
-- بی‌خطر برای اجرا در پس‌زمینه؛ اگر `api_server_enabled` در `config.json` برابر `true` باشد، هنگام راه‌اندازی خودکار فعال می‌شود
+- فراخوانی‌های Bot API را در `/bot<token>/<method>` و دانلود فایل را در `/file/bot<token>/<file_path>` می‌پذیرد
+- از `api_server_token` استفاده می‌کند، یا به توکن ربات برمی‌گردد
+- هر درخواست را به Bot API بالادست فوروارد می‌کند (از طریق `PROXY` / `HTTPS_PROXY`)
+- **آپلودهای multipart خام forward می‌شوند** — `sendDocument`، `sendPhoto`، `sendVideo`، `sendAudio`، `sendVoice`، `sendAnimation`، `sendSticker`، `sendVideoNote` همگی از پراکسی بدون خرابی کار می‌کنند.
+- **دانلود فایل کار می‌کند** — `getFile` یک `file_path` برمی‌گرداند که از `http://host:port/file/bot<token>/<file_path>` قابل دریافت است (streamed).
+- **هر پاسخ `getUpdates` را** در `tg.db` ذخیره می‌کند (پیام‌ها، ویرایش‌ها، فایل‌ها، واکنش‌ها، entityها، mention flagها) **قبل از** بازگشت به فراخواننده. `state.offset` را هم جلو می‌برد تا اجرای بعدی Monitor / Silent fetch همان آپدیت‌ها را دوباره پردازش نکند.
+- **هر پاسخی که شامل یک Message باشد** (`sendMessage`، `editMessageText`، `forwardMessage`) را در `tg.db` ذخیره می‌کند، تا پیام‌هایی که از پراکسی فرستاده شده‌اند در Web UI دیده شوند.
+- به **قفل انحصاری `getUpdates`** احترام می‌گذارد — اگر Monitor یا پولر Web UI فعال باشد، `getUpdates` از پراکسی `503` با نام owner و PID صاحب قفل برمی‌گرداند.
+- بی‌خطر برای اجرا در پس‌زمینه؛ اگر `api_server_enabled` برابر `true` باشد، هنگام راه‌اندازی خودکار فعال می‌شود.
 
 ### 🌐 Web UI (کلاینت مرورگری)
 
-از **v1.3.0**، `termgram` یک کلاینت مرورگری کامل زیر `web-ui/` همراه دارد. اجرا:
+کلاینت مرورگری کامل زیر `web-ui/`:
 
 ```bash
 python3 termgram.py web \
@@ -315,26 +379,26 @@ python3 termgram.py web \
 
 **چه چیزی می‌گیرید**
 
-- **نوار کنار** — همه‌ی چت‌های `tg.db` با بج منشن‌های خوانده‌نشده
+- **نوار کنار** — همه‌ی چت‌ها با بج منشن‌های خوانده‌نشده
 - **نمایش پیام** — حباب‌ها، پیش‌نمایش پاسخ، فوروارد از، بج مدیر فرستنده، واکنش‌های درون‌خطی
-- **ارسال** — متن، واکنش، فوروارد، آپلود (عکس/ویدیو/سند/صدا/ویس/انیمیشن/استیکر/ویدیو نوت)
-- **منشن‌ها** — منشن گروهی اعضا با همان منطق HTML `tg://user` منوی 58
-- **مدیای ذخیره‌شده** — ذخیره/ستاره/ارسال استیکر و انیمیشن (جدول `saved_media`)
-- **اطلاعات چت** — `getChat` زنده + شمارش اعضا + لیست مدیران (کش در `chat_admins`)
-- **جست‌وجوی اعضا** — `chat_users` کش‌شده با تعداد پیام
-- **واکنش‌ها** — مرتب‌شده بر اساس استفاده (`reaction_usage`)، ارسال با `setMessageReaction`
-- **آواتارها** — کش روی دیسک زیر `cache/avatars/` و `cache/chat_avatars/`
-- **کش فایل** — فایل‌های دانلودشده زیر `cache/files/` با سقف دیسک (`--cache-max-mb`)
-- **پولر (اختیاری)** — یک کلید **Sync & auto-refresh** یک thread پس‌زمینه راه می‌اندازد که `getUpdates` صدا می‌زند و در `tg.db` می‌نویسد، تا UI زنده بماند. با `--no-poller` غیرفعال کنید.
+- **ارسال** — متن، واکنش، فوروارد، آپلود
+- **منشن‌ها** — منشن گروهی با همان منطق HTML `tg://user`
+- **مدیای ذخیره‌شده** — ذخیره/ستاره/ارسال استیکر و انیمیشن
+- **اطلاعات چت** — `getChat` زنده + شمارش اعضا + لیست مدیران
+- **جست‌وجوی اعضا** — `chat_users` کش‌شده
+- **واکنش‌ها** — مرتب بر اساس استفاده (`reaction_usage`)
+- **آواتارها** — کش زیر `cache/avatars/` و `cache/chat_avatars/`
+- **کش فایل** — زیر `cache/files/` با سقف دیسک
+- **پولر (اختیاری)** — کلید **Sync & auto-refresh** یک thread پس‌زمینه راه می‌اندازد
 
 **امنیت**
 
-- همه‌ی endpointهای تغییردهنده‌ی وضعیت (`POST`) نیازمند هدر `X-CSRF-Token` منطبق با توکن CSRF نشست هستند.
-- ورود محدود به نرخ (۵ تلاش/دقیقه/IP) است.
-- کوکی نشست `HttpOnly; SameSite=Strict` است.
-- `--https-cert` و `--https-key` را بدهید تا HTTPS فعال شود؛ bind به `0.0.0.0` بدون HTTPS پرامپت تأیید نشان می‌دهد.
+- همه‌ی endpointهای تغییردهنده‌ی وضعیت (`POST`) نیازمند `X-CSRF-Token`
+- ورود محدود به نرخ (۵ تلاش/دقیقه/IP)
+- کوکی نشست `HttpOnly; SameSite=Strict`
+- `--https-cert` و `--https-key` برای HTTPS
 
-**مسیرها (برای کنجکاوها)**
+**مسیرها**
 
 ```
 POST /api/login            GET  /api/me
@@ -361,35 +425,53 @@ GET  /api/files/:unique_id    (cached, immutable)
 
 حالت مانیتور (به‌روزرسانی زنده) · پاسخ خودکار · واکنش خودکار · ویرایش واکنش‌های درون‌خطی
 
+Monitor mode توسط **قفل انحصاری `getUpdates`** محافظت می‌شود — دو کامپوننت نمی‌توانند همزمان poll کنند.
+
 ### 💾 پایگاه داده‌ی محلی (SQLite)
 
-Silent fetch · کاوشگر چت · نمایش‌گر تاریخچه · پاک‌سازی / پاکسازی — هر پیام دریافتی در `tg.db` ذخیره می‌شود
+Silent fetch · کاوشگر چت · نمایش‌گر تاریخچه · پاک‌سازی / پاکسازی — هر پیام دریافتی در `tg.db`.
 
-اسکیما شامل جدول‌های `messages`، `message_files`، `message_edits`، `message_reactions`، `entities`، `chat_users`، `chat_admins`، `chat_photos`، `user_photos`، `mention_flags`، `saved_media`، `reaction_usage`، `file_cache`، `web_sessions`، `managed_bots`، `bot_permissions` و `state` است.
+جدول‌ها: `messages`، `message_files`، `message_edits`، `message_reactions`، `entities`، `chat_users`، `chat_admins`، `chat_photos`، `user_photos`، `mention_flags`، `saved_media`، `reaction_usage`، `file_cache`، `web_sessions`، `managed_bots`، `bot_permissions`، `state`.
 
 ### 🌐 پشتیبانی پروکسی
 
-`socks5://` و `http://` — از طریق `config.json`، به‌صورت تعاملی در **منوی 17**، و **همچنین** به‌طور خودکار توسط API Server داخلی و دانلود فایل‌های Web UI استفاده می‌شود.
+`socks5://` و `http://` — از طریق `config.json`، از **تنظیمات → Configure proxy** (منوی 54 → 1)، و **همچنین** به‌طور خودکار توسط API Server و دانلود فایل‌های Web UI.
 
-### 🧭 TUI بدون پیکربندی & کاسکید منوی نرم
+### ⚙️ منوی Settings یکپارچه
 
-همه‌چیز شماره‌دار است. هیچ فلگی برای استفاده‌ی تعاملی حفظ نیست. فایل‌های پیکربندی و پایگاه داده در اولین اجرا خودکار ساخته می‌شوند. وقتی منوی تعاملی باز می‌شود، با یک کاسکید سریع و نرم انیمیت می‌شود تا از پرش‌های ناگهانی صفحه جلوگیری شود.
+همه‌ی تنظیمات غیر-پیامی زیر **منوی 54) Settings & Config**:
+
+```
+--- Settings & Config ---
+--- Network --------------------------------------
+   1) Configure proxy / retry    2) Set Base URL
+--- Bot ------------------------------------------
+   3) Manage bot token           4) Manage reactions
+--- Chat Behavior --------------------------------
+   5) Lock / Unlock chat_id      6) Toggle guest chat mode
+--- Server ---------------------------------------
+   7) API server
+
+   0) Back to main menu
+```
+
+از **همان رندر ریسپانسیو و انیمیشن منوی اصلی** استفاده می‌کند. Enter روی پرامپت خالی آن را بازنویسی می‌کند؛ بعد از هر اقدام با `Press Enter to return...` توقف می‌کند.
 
 ### 🎨 بنر نسخه
 
-هنگام راه‌اندازی تعاملی `termgram` یک بنر مرتب چاپ می‌کند:
+هنگام راه‌اندازی تعاملی:
 
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.3.0                              ║
+║  📡 termgram  v1.4.0                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 ```
 
-در **حالت CLI** بنر به یک خط کوتاه تبدیل می‌شود تا هیچ‌وقت خروجی شل را شلوغ نکند:
+در **حالت CLI** بنر به یک خط کوتاه تبدیل می‌شود:
 
 ```
-termgram v1.3.0
+termgram v1.4.0
 ```
 
 ---
@@ -400,8 +482,7 @@ termgram v1.3.0
 - `requests`
 - `PySocks`
 
-اختیاری (برای HTTPS روی Web UI):
-- `ssl` — در CPython تعبیه شده؛ فقط `--https-cert` و `--https-key` را بدهید
+اختیاری (برای HTTPS روی Web UI): `ssl` — در CPython تعبیه شده؛ فقط `--https-cert` و `--https-key` را بدهید.
 
 ---
 
@@ -423,13 +504,13 @@ pip install -r requirements.txt
 
 ### پیکربندی یکپارچه (`config.json`)
 
-همه‌ی پیکربندی — توکن ربات، پروکسی، Base URL سفارشی، تنظیمات API Server، فلگ guest-mode، قفل chat_id، و واکنش‌های سفارشی — در یک فایل `config.json` ذخیره می‌شود. می‌توانید از قالب ارائه‌شده بسازید:
+همه‌ی پیکربندی — توکن ربات، پروکسی، Base URL سفارشی، تنظیمات API Server، فلگ guest-mode، قفل chat_id، واکنش‌های سفارشی، و سرعت انیمیشن منو — در `config.json`. از قالب بسازید:
 
 ```bash
 cp config.json.example config.json
 ```
 
-یا صرفاً `termgram` را مستقیم اجرا کنید (`python3 termgram.py`): `termgram` به‌طور خودکار `config.json` و `tg.db` را در اولین اجرا می‌سازد و به‌صورت تعاملی از شما می‌خواهد توکن ربات معتبر وارد کنید!
+یا `termgram` را مستقیم اجرا کنید — به‌طور خودکار `config.json` و `tg.db` را می‌سازد و از شما توکن می‌خواهد.
 
 نمونه‌ی `config.json`:
 
@@ -444,6 +525,7 @@ cp config.json.example config.json
   "api_server_token": "",
   "guest_chat_mode": false,
   "locked_chat_id": "",
+  "menu_speed": "fast",
   "reactions": [
     { "emoji": "👍", "label": "Thumbs Up" },
     { "emoji": "👎", "label": "Thumbs Down" },
@@ -453,15 +535,16 @@ cp config.json.example config.json
 }
 ```
 
-1. **توکن ربات**: از [@BotFather](https://t.me/BotFather) بگیرید. برای **Managed Bots**، **Bot Management Mode** را در `@BotFather` فعال کنید.
-2. **پروکسی (اختیاری)**: اسکیم‌های پشتیبانی‌شده: `socks5://`، `http://`، `https://`. برای اتصال مستقیم `""` بگذارید.
-3. **واکنش‌ها**: لیست گلچین‌شده‌ی ایموجی‌ها. از طریق **منوی 51) Manage reactions** قابل تنظیم است.
-4. **`base_url`** (اختیاری): آدرس ریشه‌ی سفارشی برای Bot API (پیش‌فرض `https://api.telegram.org`).
-5. **`api_server_*`** (اختیاری): فعال‌سازی بریج داخلی، انتخاب host/port، و اختیاراً تنظیم `api_server_token` اختصاصی (خالی = استفاده‌ی مجدد از توکن ربات). منوی **52**.
-6. **`guest_chat_mode`** (اختیاری): محدود کردن مانیتور به پیام‌های guest/business. منوی **56**.
-7. **`locked_chat_id`** (اختیاری): پین یک chat ID تا هر پرامپتی که در غیر این صورت یکی می‌خواست بی‌صدا از این استفاده کند. منوی **55**.
+1. **توکن ربات** — از [@BotFather](https://t.me/BotFather). برای **Managed Bots**، **Bot Management Mode** را فعال کنید.
+2. **پروکسی (اختیاری)** — `socks5://`، `http://`، `https://`. `""` = مستقیم.
+3. **واکنش‌ها** — از **تنظیمات → Manage reactions** (منوی 54 → 4).
+4. **`base_url`** (اختیاری) — URL ریشه‌ی سفارشی.
+5. **`api_server_*`** (اختیاری) — بریج داخلی.
+6. **`guest_chat_mode`** (اختیاری) — محدود کردن مانیتور به guest.
+7. **`locked_chat_id`** (اختیاری) — پین یک chat ID بی‌صدا.
+8. **`menu_speed`** (اختیاری) — `off` / `fast` / `normal` / `slow`.
 
-> 💡 **ارتقای خودکار & مهاجرت**: اگر از نسخه‌ی قدیمی‌تر ارتقا می‌دهید، `termgram` به‌طور خودکار `token.txt`، `proxy.txt` و `reactions.txt` موجود را می‌خواند، تنظیماتشان را به `config.json` منتقل می‌کند و فایل‌های قدیمی را پاک‌سازی می‌کند.
+> 💡 **مهاجرت خودکار**: اگر از نسخه‌ی قدیمی‌تر ارتقا می‌دهید، `termgram` به‌طور خودکار `token.txt`، `proxy.txt` و `reactions.txt` را می‌خواند، تنظیماتشان را منتقل می‌کند و فایل‌های قدیمی را پاک می‌کند.
 
 ---
 
@@ -473,11 +556,9 @@ cp config.json.example config.json
 python3 termgram.py
 ```
 
-خواهید دید:
-
 ```
 ╔════════════════════════════════════════════════════╗
-║  📡 termgram  v1.3.0                               ║
+║  📡 termgram  v1.4.0                              ║
 ║  Terminal client for Telegram bots                 ║
 ╚════════════════════════════════════════════════════╝
 Connecting to Telegram API...
@@ -485,30 +566,49 @@ Connecting to Telegram API...
 
 =============== Telegram Bot Sender ===============
   Locked chat_id: (none)   Guest: OFF   API: OFF
+
+--- Send Messages ---------------------------------
    1) Text message              2) Photo
    3) Animation (GIF)           4) Video
-   ...
-  49) Get current profile
-  50) Manage bot token         51) Manage reactions
+   5) Document / File           6) Audio
+   7) Voice                     8) Video note
+   9) Sticker                  10) Location
+  11) Contact                  12) Poll
+  13) Dice                     14) Reaction
+  15) Edit message             16) Delete message
 --- Chat Management -------------------------------
-  19) Leave chat               20) Get chat info
-  ...
---- Monitor ---------------------------------------
-  39) Monitor mode
---- Data / DB -------------------------------------
-  46) Silent fetch             47) Chat explorer
-  48) History viewer
---- Advanced -------------------------------------
-  52) API Server               53) Bot management
-  54) Purge DB data            55) Lock/Unlock chat_id
-  56) Toggle guest chat mode
-  57) Chat members (DB)        58) Mention members
-  59) User account info        60) Managed bot link
+  17) Leave chat               18) Get chat info
+  19) Member count             20) Pin message
+  21) Unpin message            22) Forward message
+  23) Chat action              24) Ban user
+  25) Unban user               26) Set chat title
+  27) Set chat desc            28) Set admin title
+  29) Set bot name             30) Create invite link
+--- Bot Profile -----------------------------------
+  31) Bot info (getMe)         32) Set bio (desc)
+  33) Set short bio            34) Set profile photo
+  35) Remove photo             36) Get current profile
+--- Files -----------------------------------------
+  37) Download by id           38) Upload & get id
+--- Monitor & Data --------------------------------
+  39) Monitor mode             40) Silent fetch
+  41) Chat explorer            42) History viewer
+--- Admin & Members -------------------------------
+  43) Member info              44) Promote admin
+  45) Demote admin             46) Set user title
+  47) Set member tag           48) Chat members (DB)
+  49) Mention members          50) User account info
+--- Bot Management --------------------------------
+  51) Bot management           52) Managed bot link
+  53) Purge DB data
+--- Settings --------------------------------------
+  54) Settings & Config
 
    0) Exit
+choice:
 ```
 
-فقط یک شماره انتخاب کنید و پرامپت‌ها را دنبال کنید.
+منو **کاملاً ریسپانسیو** است — اگر ترمینال شما به‌اندازه‌ی کافی عریض باشد، ستون‌ها از ۲ به ۵ به‌طور خودکار گسترش می‌یابند. با Enter روی پرامپت خالی، منو دوباره بارگذاری می‌شود.
 
 #### مثال: ارسال متن با دکمه‌ها
 
@@ -542,30 +642,46 @@ text: Hello from termgram!
 >> sendMessage ...
 ✔ Sent successfully
 📨 message_id: 1234
+
+Press Enter to return to main menu...
 ```
 
-#### مثال: ساخت یک Managed Bot
+#### مثال: دانلود آهنگ‌های پروفایل
 
 ```
 choice: 60
 
---- Create Managed Bot Invite Link ---
-Suggested username for new bot (e.g. MyCoolBot): MyShopBot
-Suggested display name (optional): My Shop Assistant
+--- User Profile Audios ---
+user_id (numeric): 123456789
+>> getUserProfileAudios ...
+output dir [default: .]: ./songs
 
-✔ Link generated:
-  https://t.me/newbot/MyManagerBot/MyShopBot?name=My%20Shop%20Assistant
+--- 3 profile audio(s) ---
+    1) 🎵 Love Story — Taylor Swift
+         duration=235s  size=3520123B
+    2) 🎵 Blinding Lights — The Weeknd
+         duration=200s  size=2988771B
+    3) 🎵 Shape of You — Ed Sheeran
+         duration=233s  size=3412345B
 
-Share this link with users so they can create a bot managed by you.
+  type a number to download that song
+  a) Download all   j) Export JSON   0) Back
+choice: 2
+
+⬇  The Weeknd - Blinding Lights.mp3  (2.9MB)
+⬇ [████████████████████████████████████] 100.0%  2.9MB/2.9MB  512.3KB/s ETA 0s
+✔ saved: ./songs/The Weeknd - Blinding Lights.mp3  (2918.7 KB)
+
+--- 3 profile audio(s) ---
+  ...
+choice: 0
 ```
-
-وقتی کاربر آن لینک را باز می‌کند و تأیید می‌کند، ربات مدیر شما `updateManagedBot` دریافت می‌کند و `termgram` اطلاعات ربات جدید به‌همراه توکنش را به‌طور خودکار چاپ می‌کند.
 
 ---
 
 ### حالت CLI
 
-هر آرگومان بعد از نام اسکریپت `termgram` را به حالت غیرتعاملی می‌برد. هر ساب‌کامند یک exit code شل برمی‌گرداند (`0` = موفق، غیر صفر = خطا)، پس با اسکریپت‌ها خوب ترکیب می‌شود.
+هر آرگومان بعد از نام اسکریپت `termgram` را به حالت غیرتعاملی می‌برد. هر ساب‌کامند یک exit code برمی‌گرداند.
 
 ```bash
 python3 termgram.py --help
@@ -626,7 +742,7 @@ Files:
   upload      upload a file and print its file_id
 
 Web UI:
-  web         start the browser client (see examples)
+  web         start the browser client
 
 Examples:
   termgram text 123456 "Hello"
@@ -638,15 +754,6 @@ Examples:
   termgram download AgACAgQAAxkBAA... --out file.bin
   termgram upload 123456 ./img.png --as photo
   termgram web --host 127.0.0.1 --port 8081 --password "secret"
-```
-
-هر ساب‌کامند هم `--help` مخصوص خودش را دارد:
-
-```bash
-python3 termgram.py photo --help
-python3 termgram.py ban --help
-python3 termgram.py reply --help
-python3 termgram.py web --help
 ```
 
 #### مثال‌های CLI
@@ -674,7 +781,7 @@ python3 termgram.py react  -1001234567890 99 👍
 python3 termgram.py edit   -1001234567890 99 "updated text"
 python3 termgram.py delete -1001234567890 99
 python3 termgram.py pin    -1001234567890 99
-python3 termgram.py unpin  -1001234567890            # unpin all
+python3 termgram.py unpin  -1001234567890
 python3 termgram.py forward @src 42 @dst
 python3 termgram.py chat-action @mychannel typing
 python3 termgram.py reply @news 100 -1001234567890 "this is important"
@@ -706,24 +813,15 @@ python3 termgram.py download AgACAgQAAxkBAA... --out pic.jpg
 python3 termgram.py upload -1001234567890 ./img.png --as photo
 
 # ── Web UI ────────────────────────────────────────────────
-# فقط localhost، HTTP، رمز = توکن ربات
 python3 termgram.py web
-
-# پورت سفارشی + رمز صریح
 python3 termgram.py web --host 0.0.0.0 --port 9090 --password "s3cr3t"
-
-# HTTPS با گواهی خودتان (برای هاست عمومی توصیه می‌شود)
 python3 termgram.py web --host 0.0.0.0 --port 443 \
     --https-cert ./cert.pem --https-key ./key.pem \
     --password "s3cr3t"
-
-# فقط localhost، پولر غیرفعال (اگر Monitor جای دیگر اجرا می‌کنید)
 python3 termgram.py web --no-poller
 ```
 
 ##### منابع متن و کپشن
-
-چند ساب‌کامند متن را **درون‌خطی** یا **از فایل** می‌پذیرند:
 
 | ساب‌کامند | شکل درون‌خطی | شکل فایل |
 |-----------|-------------|-----------|
@@ -733,12 +831,12 @@ python3 termgram.py web --no-poller
 | `set-bio` | `description` موقعیتی | `--bio-file F` |
 | `set-short-bio` | `description` موقعیتی | `--bio-file F` |
 
-ساب‌کامندهای فایل‌محور (photo، document، video، audio، voice، animation) دو گزینه‌ی متقابلاً انحصاری برای کپشن دارند:
+ساب‌کامندهای فایل‌محور دو گزینه‌ی متقابلاً انحصاری برای کپشن دارند:
 
 | گزینه | معنی |
 |-------|------|
-| `--caption TEXT` | رشته‌ی کپشن درون‌خطی. |
-| `--caption-file F` | خواندن کپشن از فایل `F` (UTF-8، چندخطی امن). |
+| `--caption TEXT` | رشته‌ی کپشن درون‌خطی |
+| `--caption-file F` | خواندن کپشن از فایل `F` (UTF-8، چندخطی امن) |
 
 اگر هر دو داده شوند، `--caption-file` اولویت دارد.
 
@@ -746,25 +844,13 @@ python3 termgram.py web --no-poller
 
 | کد | معنی |
 |----|------|
-| `0` | موفق (تلگرام `ok` برگرداند) |
+| `0` | موفق |
 | `1` | تلگرام خطا برگرداند |
-| `2` | خطای استفاده/فایل محلی (فایل گم‌شده، …) |
-
-##### بنر CLI
-
-در حالت CLI بنر عمداً کوچک است تا با خیال راحت pipe شود:
-
-```
-termgram v1.3.0
-```
-
-بدون پرامپت اتصال، بدون «press any key» — یک دستور یک‌باره اجرا می‌شود، نتیجه‌اش را چاپ می‌کند و خارج می‌شود.
+| `2` | خطای استفاده/فایل محلی |
 
 ---
 
 ### Web UI (کلاینت مرورگری)
-
-سرور را اجرا کنید:
 
 ```bash
 python3 termgram.py web --host 127.0.0.1 --port 8081 --password "your-secret"
@@ -774,22 +860,22 @@ python3 termgram.py web --host 127.0.0.1 --port 8081 --password "your-secret"
 
 | فلگ | پیش‌فرض | کاربرد |
 |-----|---------|--------|
-| `--host` | `127.0.0.1` | آدرس bind (`0.0.0.0` برای LAN — نیازمند تأیید) |
+| `--host` | `127.0.0.1` | آدرس bind |
 | `--port` | `8081` | پورت TCP |
-| `--password` | توکن ربات | رمز ورود — **همیشه برای هاست عمومی یک رمز جداگانه تنظیم کنید** |
+| `--password` | توکن ربات | رمز ورود |
 | `--session-ttl` | `86400` | طول عمر نشست به ثانیه |
-| `--cache-max-mb` | `512` | حداکثر کش دیسک برای فایل‌های دانلودشده |
-| `--https-cert` / `--https-key` | — | گواهی PEM + کلید خصوصی برای فعال‌سازی HTTPS |
-| `--no-poller` | خاموش | پولر `getUpdates` پس‌زمینه را راه‌اندازی نکن |
+| `--cache-max-mb` | `512` | حداکثر کش دیسک |
+| `--https-cert` / `--https-key` | — | گواهی PEM + کلید برای HTTPS |
+| `--no-poller` | خاموش | پولر پس‌زمینه را راه‌اندازی نکن |
 
-**Web UI نیازمند وجود پوشه‌ی `web-ui/`** (شامل `index.html`، `app.js`، `style.css`، `favicon.svg`) در کنار `termgram.py` است. اگر مخزن را clone کرده‌اید، آن‌ها همان‌جا هستند.
+**Web UI نیازمند وجود پوشه‌ی `web-ui/`** (شامل `index.html`، `app.js`، `style.css`، `favicon.svg`) در کنار `termgram.py` است.
 
 ---
 
 ## 🖥 نکات پلتفرم
 
 - ✅ **لینوکس / مک**: کاملاً پشتیبانی می‌شود.
-- ⚠️ **ویندوز**: کاراکترهای فارسی ممکن است در ترمینال پیش‌فرض درست رندر نشوند. از **Windows Terminal** با فونتی که RTL را پشتیبانی می‌کند (مثل *Cascadia Code*، *Vazirmatn*) استفاده کنید یا داخل **WSL** اجرا کنید. Web UI تحت تأثیر نیست و در هر مرورگری کار می‌کند.
+- ⚠️ **ویندوز**: کاراکترهای فارسی ممکن است در ترمینال پیش‌فرض درست رندر نشوند. از **Windows Terminal** با فونتی که RTL را پشتیبانی می‌کند (مثل *Cascadia Code*، *Vazirmatn*) استفاده کنید یا داخل **WSL** اجرا کنید. Web UI تحت تأثیر نیست.
 
 ---
 
@@ -805,13 +891,18 @@ python3 termgram.py web --host 127.0.0.1 --port 8081 --password "your-secret"
 | `config.json` | پیکربندی و اسرار واقعی شما | ❌ (gitignored) |
 | `tg.db` | پایگاه داده‌ی پیام محلی | ❌ (gitignored) |
 | `cache/` | کش فایل/آواتار/مدیا برای Web UI | ❌ (gitignored) |
-| `get_updates_py.sh` | اسکریپت شل قدیمی (منسوخ با Silent fetch) | ❌ |
+| `.getupdates.lock` | قفل cross-process getUpdates | ❌ (gitignored) |
 
 ---
 
 ## 🤝 مشارکت
 
-مشارکت از **همکاران دعوت‌شده** استقبال می‌شود. اگر می‌خواهید کمک کنید، ابتدا یک issue باز کنید تا در مورد تغییراتی که می‌خواهید بدهید بحث شود.
+مشارکت از **همکاران دعوت‌شده** استقبال می‌شود. ابتدا یک issue باز کنید. هنگام تست یک پچ، لطفاً این‌ها را هم بررسی کنید:
+
+- رفتار قفل `getUpdates` بین Monitor / Silent fetch / Web poller / API Server
+- آپلود فایل multipart از طریق API Server
+- دانلود streamed از `/file/bot<token>/<path>`
+- منوی ریسپانسیو در عرض‌های مختلف (80، 120، 200 ستون)
 
 ---
 

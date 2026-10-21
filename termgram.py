@@ -21,6 +21,134 @@ import secrets
 from datetime import datetime, timezone
 import argparse
 from typing import Optional, Dict, Any, List, Tuple
+import atexit
+
+# ============ getUpdates Lock (apt-style) ============
+_LOCK_FILE = ".getupdates.lock"
+_lock_handle = None
+_lock_owner: Optional[str] = None
+
+
+def _try_flock(fh) -> bool:
+    """Try to acquire a non-blocking exclusive lock on an open file handle."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def _unlock_file(fh) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def acquire_getupdates_lock(owner: str) -> bool:
+    """Acquire the exclusive getUpdates lock.
+       owner: 'monitor' | 'silent-fetch' | 'web-poller' | 'api-server'
+       Returns True if acquired (or already held by same owner in this process).
+    """
+    global _lock_handle, _lock_owner
+    if _lock_handle is not None:
+        return _lock_owner == owner
+    try:
+        fh = open(_LOCK_FILE, "a+")
+    except Exception as e:
+        print(f"{Y}⚠ Cannot open lock file: {e}{N}")
+        return False
+    if not _try_flock(fh):
+        fh.close()
+        return False
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(json.dumps({
+            "owner": owner,
+            "pid": os.getpid(),
+            "started": time.time(),
+        }))
+        fh.flush()
+    except Exception:
+        pass
+    _lock_handle = fh
+    _lock_owner = owner
+    return True
+
+
+def release_getupdates_lock() -> None:
+    """Release the lock if this process holds it."""
+    global _lock_handle, _lock_owner
+    if _lock_handle is None:
+        return
+    try:
+        _unlock_file(_lock_handle)
+        _lock_handle.close()
+    except Exception:
+        pass
+    _lock_handle = None
+    _lock_owner = None
+
+
+def getupdates_lock_holder() -> Optional[dict]:
+    """Return who holds the lock (None if free). Uses flock to verify."""
+    try:
+        if not os.path.exists(_LOCK_FILE):
+            return None
+        with open(_LOCK_FILE, "a+") as fh:
+            if _try_flock(fh):
+                _unlock_file(fh)
+                return None
+            fh.seek(0)
+            content = fh.read().strip()
+            if not content:
+                return {"owner": "?", "pid": "?", "started": 0}
+            try:
+                return json.loads(content)
+            except Exception:
+                return {"owner": "?", "pid": "?", "started": 0}
+    except Exception:
+        return None
+
+
+def _fmt_age(started: float) -> str:
+    if not started:
+        return "?"
+    age = max(0, time.time() - started)
+    if age < 60:
+        return f"{int(age)}s"
+    m, s = divmod(int(age), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def print_lock_holder(prefix: str = "") -> None:
+    holder = getupdates_lock_holder()
+    if not holder:
+        print(f"{prefix}{Y}lock is free{N}")
+        return
+    print(f"{prefix}{R}✘ getUpdates lock held by: "
+          f"{holder.get('owner', '?')} "
+          f"(pid {holder.get('pid', '?')}, "
+          f"age {_fmt_age(holder.get('started', 0))}){N}")
+
+
+atexit.register(release_getupdates_lock)
 
 # ============ Third-party Dependencies ============
 try:
@@ -53,7 +181,7 @@ except ImportError:
 
 # ============ App info ============
 APP_NAME    = "termgram"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 APP_TAGLINE = "Terminal client for Telegram bots"
 
 # ============ Configuration ============
@@ -252,6 +380,132 @@ R = '\033[31m'
 B = '\033[36m'
 M = '\033[35m'
 N = '\033[0m'
+
+# ============ Terminal helpers ============
+import shutil
+
+def clear_screen() -> None:
+    """Clear the screen AND the scrollback buffer."""
+    try:
+        # \033[H   — cursor to home
+        # \033[2J  — erase visible screen
+        # \033[3J  — erase saved lines (scrollback)
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+    except Exception:
+        os.system("cls" if os.name == "nt" else "clear")
+
+def _term_size() -> Tuple[int, int]:
+    sz = shutil.get_terminal_size(fallback=(80, 24))
+    return sz.columns, sz.lines
+
+# ============ Progress helpers ============
+def _human_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+
+def _format_eta(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def draw_progress(done: int, total: Optional[int],
+                  start_time: float,
+                  width: Optional[int] = None,
+                  prefix: str = "") -> None:
+    """One-line in-place progress bar (rewrites the same line with \\r)."""
+    if width is None:
+        term_w, _ = _term_size()
+        # leave room for numbers/speed/ETA around the bar
+        width = max(10, min(40, term_w - 60))
+
+    elapsed = max(0.001, time.time() - start_time)
+    speed_bps = done / elapsed if done else 0
+
+    if total and total > 0:
+        pct = min(1.0, done / total)
+        filled = int(width * pct)
+        bar = "█" * filled + "░" * (width - filled)
+        eta = ""
+        if speed_bps > 1 and total > done:
+            eta = f" ETA {_format_eta((total - done) / speed_bps)}"
+        line = (
+            f"{prefix}[{bar}] {pct * 100:5.1f}%  "
+            f"{_human_size(done)}/{_human_size(total)}  "
+            f"{_human_size(speed_bps)}/s{eta}"
+        )
+    else:
+        # unknown total — spinner
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        spin = frames[int(time.time() * 10) % len(frames)]
+        line = (
+            f"{prefix}{spin} {_human_size(done)}  "
+            f"{_human_size(speed_bps)}/s"
+        )
+
+    # pad to terminal width so nothing stale remains
+    term_w, _ = _term_size()
+    sys.stdout.write("\r" + line.ljust(term_w - 1))
+    sys.stdout.flush()
+
+
+def finish_progress(prefix: str = "") -> None:
+    """Print final newline after the progress bar."""
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+class ProgressFileReader:
+    """File-like wrapper that reports read progress. Compatible with `requests`
+       (multipart upload uses this to track bytes sent)."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._f = open(path, "rb")
+        self.total = os.path.getsize(path)
+        self.done = 0
+        self.start = time.time()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._f.read(size)
+        if chunk:
+            self.done += len(chunk)
+            draw_progress(self.done, self.total, self.start,
+                          prefix="⬆ ")
+        return chunk
+
+    def __len__(self) -> int:
+        return self.total
+
+    def __iter__(self):
+        return iter(lambda: self.read(8192), b"")
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        result = self._f.seek(pos, whence)
+        self.done = self._f.tell()
+        return result
+
+    def tell(self) -> int:
+        return self._f.tell()
+
+    def close(self) -> None:
+        self._f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
 
 # ============ Global state ============
 PROXY = ""
@@ -1062,14 +1316,14 @@ def guess_mime(filename: str) -> str:
 
 
 def handle_file_field(field_name: str) -> Tuple[Optional[str], Optional[dict]]:
-    """Ask user for file path / URL / file_id. Returns (key, files_dict_or_value)."""
     value = input(f"input {field_name} (file path / URL / file_id): ").strip()
     if not value:
         print(f"{R}value is empty{N}")
         return None, None
     if os.path.isfile(value):
         mime = guess_mime(value)
-        files = {field_name: (os.path.basename(value), open(value, "rb"), mime)}
+        pf = ProgressFileReader(value)
+        files = {field_name: (os.path.basename(value), pf, mime)}
         return None, files
     return value, None
 
@@ -2821,36 +3075,140 @@ def remove_profile_photo(bot: TelegramBot):
 # ================================================================
 #  File upload / download
 # ================================================================
+def _download_by_file_id(bot: TelegramBot, file_id: Optional[str],
+                         meta: dict, out_dir: str = ".") -> Optional[str]:
+    """Download a file by file_id, with a live progress bar."""
+    if not file_id:
+        print(f"{Y}skip: no file_id{N}")
+        return None
+
+    resp = bot.post("getFile", data={"file_id": file_id}, ask_retry=False)
+    if not resp or not resp.get("ok"):
+        desc = (resp.get("description") if isinstance(resp, dict) else "no response")
+        print(f"{R}✘ getFile failed: {desc}{N}")
+        return None
+
+    result = resp["result"]
+    fpath = result.get("file_path")
+    file_size = result.get("file_size")
+    if not fpath:
+        print(f"{R}✘ no file_path returned{N}")
+        return None
+
+    # --- safe filename ---
+    title = (meta.get("title") or "audio").strip()
+    performer = (meta.get("performer") or "").strip()
+    safe = re.sub(r'[\\/:*?"<>|]', "_",
+                  f"{performer} - {title}".strip(" -")) or "audio"
+    ext = os.path.splitext(fpath)[1] or ".mp3"
+    out = os.path.join(out_dir, safe + ext)
+
+    base, e = os.path.splitext(out)
+    n = 1
+    while os.path.exists(out):
+        out = f"{base} ({n}){e}"
+        n += 1
+
+    url = f"{bot.file_api}/{fpath}"
+    print(f"{B}⬇  {os.path.basename(out)}{N}  ({_human_size(file_size or 0)})")
+
+    start = time.time()
+    tmp = out + ".part"
+    try:
+        r = bot.session.get(url, timeout=120, stream=True)
+        r.raise_for_status()
+
+        # prefer server Content-Length; fall back to getFile's file_size
+        total = int(r.headers.get("Content-Length") or 0) or file_size
+        done = 0
+
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(65536):
+                f.write(chunk)
+                done += len(chunk)
+                draw_progress(done, total, start, prefix="⬇ ")
+
+        os.replace(tmp, out)
+        finish_progress()
+        size_kb = os.path.getsize(out) / 1024
+        print(f"{G}✔ saved: {out}  ({size_kb:.1f} KB){N}")
+        return out
+
+    except Exception as e:
+        finish_progress()
+        print(f"{R}✘ download failed: {e}{N}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return None
+
+def _download_to_path(bot: TelegramBot, file_id: str, out_path: str) -> bool:
+    resp = bot.post("getFile", data={"file_id": file_id}, ask_retry=False)
+    if not resp or not resp.get("ok"):
+        desc = (resp.get("description") if isinstance(resp, dict) else "no response")
+        print(f"{R}✘ getFile failed: {desc}{N}")
+        return False
+
+    result = resp["result"]
+    fpath = result.get("file_path")
+    file_size = result.get("file_size")
+    if not fpath:
+        print(f"{R}✘ no file_path{N}")
+        return False
+
+    url = f"{bot.file_api}/{fpath}"
+    print(f"{B}⬇  {os.path.basename(out_path)}{N}  "
+          f"({_human_size(file_size or 0)})")
+
+    start = time.time()
+    tmp = out_path + ".part"
+    try:
+        r = bot.session.get(url, timeout=120, stream=True)
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length") or 0) or file_size
+        done = 0
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(65536):
+                f.write(chunk)
+                done += len(chunk)
+                draw_progress(done, total, start, prefix="⬇ ")
+        os.replace(tmp, out_path)
+        finish_progress()
+        print(f"{G}✔ saved: {out_path}  "
+              f"({os.path.getsize(out_path) / 1024:.1f} KB){N}")
+        return True
+    except Exception as e:
+        finish_progress()
+        print(f"{R}✘ failed: {e}{N}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
 def download_file_by_id(bot: TelegramBot):
     print(f"\n{B}--- Download File by file_id ---{N}")
     file_id = input("file_id: ").strip()
     if not file_id:
         print(f"{R}file_id is required{N}")
         return
-    print(f"{Y}>> getFile ...{N}")
-    resp = bot.post("getFile", data={"file_id": file_id})
-    if not resp or not resp.get("ok"):
-        show_info_result(resp)
-        return
-    file_path = resp["result"].get("file_path")
-    fsize = resp["result"].get("file_size")
-    if fsize:
-        print(f"{B}file_size:{N} {fsize} bytes")
-    if not file_path:
-        print(f"{R}✘ could not resolve file_path{N}")
-        return
-    fname = os.path.basename(file_path)
-    out = input(f"save as [default: {fname}]: ").strip() or fname
-    url = f"{bot.file_api}/{file_path}"
-    print(f"{Y}>> downloading to {out} ...{N}")
-    try:
-        resp_dl = bot.session.get(url, timeout=60)
-        with open(out, "wb") as f:
-            f.write(resp_dl.content)
-        size_kb = os.path.getsize(out) / 1024
-        print(f"{G}✔ Saved: {out} ({size_kb:.1f} KB){N}")
-    except Exception as e:
-        print(f"{R}✘ download failed: {e}{N}")
+
+    out = input("save as (empty = auto name): ").strip() or None
+    if out:
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+    # use the helper with an empty meta so it derives a name from file_path
+    meta = {"title": os.path.basename(out) if out else "",
+            "performer": ""}
+    # temporarily force the exact name if user gave one
+    if out:
+        _download_to_path(bot, file_id, out)
+    else:
+        _download_by_file_id(bot, file_id, {"title": "", "performer": ""},
+                             out_dir=".")
 
 
 def upload_and_get_file_id(bot: TelegramBot):
@@ -2882,6 +3240,7 @@ def upload_and_get_file_id(bot: TelegramBot):
     field, method = mapping[ftype]
     ans = input("disable_notification? [y/N]: ").strip()
     mime = guess_mime(fpath)
+    pf = ProgressFileReader(fpath) 
     files = {field: (os.path.basename(fpath), open(fpath, "rb"), mime)}
     data = {"chat_id": chat_id}
     if ans.lower() == "y":
@@ -3347,9 +3706,37 @@ def monitor_mode(bot: TelegramBot):
                             if r and r.get("ok"):
                                 print(f"{G}✔ Reaction {emoji} sent{N}")
                                 acted = True
+                                # ── persist to DB ──
+                                try:
+                                    _pc = sqlite3.connect(DB_FILE); db_init(_pc)
+                                    _prev_row = _pc.execute(
+                                        "SELECT new_reactions FROM message_reactions "
+                                        " WHERE chat_id = ? AND message_id = ? "
+                                        "   AND user_id = ? "
+                                        " ORDER BY changed_at DESC LIMIT 1",
+                                        (chat_id, descr['message_id'], bot.bot_id)).fetchone()
+                                    _prev_rx = (json.loads(_prev_row[0])
+                                                if _prev_row and _prev_row[0] else [])
+                                    _new_rx = [{"type": "emoji", "emoji": emoji}]
+                                    _pc.execute(
+                                        "INSERT INTO message_reactions "
+                                        "(chat_id, message_id, user_id, actor_chat_id, "
+                                        " old_reactions, new_reactions, is_anonymous, "
+                                        " changed_at, first_seen_at) "
+                                        "VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?)",
+                                        (chat_id, descr['message_id'], bot.bot_id,
+                                        json.dumps(_prev_rx, ensure_ascii=False),
+                                        json.dumps(_new_rx, ensure_ascii=False),
+                                        int(time.time()), db_utcnow()))
+                                    _apply_reaction_delta(
+                                        _pc, chat_id, descr['message_id'],
+                                        _prev_rx, _new_rx)
+                                    _pc.commit()
+                                    _pc.close()
+                                except Exception as e:
+                                    print(f"{Y}⚠ react persist: {e}{N}")
                             else:
-                                print(f"{R}✘ Reaction failed: "
-                                      f"{(r or {}).get('description', '?')}{N}")
+                                print(f"{R}✘ Reaction failed{N}")
                         continue
 
                     if cmd == "f":
@@ -3363,6 +3750,7 @@ def monitor_mode(bot: TelegramBot):
                             if r and r.get("ok"):
                                 print(f"{G}✔ Forwarded{N}")
                                 acted = True
+                                _persist_from_resp(r)
                             else:
                                 print(f"{R}✘ Forward failed{N}")
                         continue
@@ -4041,16 +4429,88 @@ def manage_reactions_menu():
             print(f"{R}invalid choice{N}")
 
 
+# ============ Menu animation ============
+MENU_SPEED = "fast"   # "off" | "fast" | "normal" | "slow"
+
+_SPEED_MAP = {
+    "off":    (0.0,   0.0),
+    "fast":   (0.006, 0.008),
+    "normal": (0.012, 0.015),
+    "slow":   (0.025, 0.03),
+}
+
+def _tw_print(text: str, delay: float) -> None:
+    """Typewriter effect — only if stdout is a real terminal."""
+    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    if not is_tty or delay <= 0:
+        print(text)
+        return
+    for ch in text:
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        time.sleep(delay)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def render_menu(header_lines: List[str],
+                groups: List[Tuple[Optional[str], List[Tuple[int, str]]]],
+                footer_lines: Optional[List[str]] = None) -> None:
+    char_delay, line_delay = _SPEED_MAP.get(MENU_SPEED, _SPEED_MAP["fast"])
+
+    term_w, _ = _term_size()
+    min_cell_width = 32
+    columns = max(1, min(term_w // min_cell_width, 5))
+    cell_width = max(min_cell_width, term_w // columns)
+
+    # --- phase 1: header (typewriter on the title line only) ---
+    for i, line in enumerate(header_lines):
+        if i == 0 and line.strip():
+            # only the title line gets the typewriter; rest are instant
+            _tw_print(line, char_delay)
+        else:
+            print(line)
+
+    # --- phase 2: groups ---
+    for title, items in groups:
+        if not items:
+            continue
+        if title:
+            dashes = max(0, term_w - len(title) - 8)
+            header_line = f"  {B}--- {title} " + "-" * dashes + f"{N}"
+            print(header_line)
+            if line_delay > 0 and hasattr(sys.stdout, "isatty") \
+                    and sys.stdout.isatty():
+                time.sleep(line_delay * 2)
+        for i in range(0, len(items), columns):
+            row = items[i:i + columns]
+            line = "  "
+            for num, label in row:
+                cell = f"{num:>2}) {label}"
+                line += cell[:cell_width].ljust(cell_width)
+            print(line)
+            if line_delay > 0 and hasattr(sys.stdout, "isatty") \
+                    and sys.stdout.isatty():
+                time.sleep(line_delay)
+
+    # --- phase 3: footer ---
+    if footer_lines:
+        for line in footer_lines:
+            print(line)
+            if line_delay > 0 and hasattr(sys.stdout, "isatty") \
+                    and sys.stdout.isatty():
+                time.sleep(line_delay)
+
+
+# kept for backward compat
 def render_animated_menu(lines: List[str], delay: float = 0.005) -> None:
-    """Print menu lines with a fast cascading animation for a smooth, non-jarring appearance."""
     is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
     for line in lines:
         print(line)
         if is_tty and delay > 0:
             time.sleep(delay)
 
-
-def format_menu_row(n1: int, t1: str, n2: Optional[int] = None, t2: Optional[str] = None) -> str:
+def format_menu_row(n1, t1, n2=None, t2=None):
     if n2 is not None and t2 is not None:
         return f"  {n1:2d}) {t1:<22s}   {n2:2d}) {t2:<22s}"
     return f"  {n1:2d}) {t1}"
@@ -4062,6 +4522,16 @@ def print_menu_row(n1, t1, n2, t2):
 import threading
 import http.server
 import urllib.parse
+
+def _try_persist_payload(payload: bytes) -> None:
+    """If payload is a Message object, persist to DB. Silent on failure."""
+    try:
+        js = json.loads(payload)
+        if js.get("ok") and isinstance(js.get("result"), dict):
+            if "message_id" in js["result"]:
+                _persist_from_resp(js)
+    except Exception:
+        pass
 
 _api_server_instance = {"httpd": None, "thread": None}
 
@@ -4090,76 +4560,141 @@ def _start_api_server(bot: TelegramBot) -> bool:
         def _handle(self):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+
+            # ---------- file download: /file/bot<token>/<path> ----------
+            if path.startswith(f"/file/bot{api_token}/"):
+                file_path = path[len(f"/file/bot{api_token}/"):]
+                url = f"{bot.file_api}/{file_path}"
+                sess = requests.Session()
+                if _proxy:
+                    sess.proxies = {"http": _proxy, "https": _proxy}
+                try:
+                    r = sess.get(url, timeout=120, stream=True)
+                    self.send_response(r.status_code)
+                    for h in ("Content-Type", "Content-Length", "Content-Disposition"):
+                        if h in r.headers:
+                            self.send_header(h, r.headers[h])
+                    self.end_headers()
+                    for chunk in r.iter_content(65536):
+                        self.wfile.write(chunk)
+                except Exception as e:
+                    self._respond(502, json.dumps(
+                        {"ok": False, "description": str(e)}).encode())
+                return
+
+            # ---------- bot methods: /bot<token>/<method> ----------
             if not path.startswith(f"/bot{api_token}/"):
                 self._respond(404, b'{"ok":false,"description":"unknown token"}')
                 return
+
             method = path.rsplit("/", 1)[-1]
             qs = urllib.parse.parse_qs(parsed.query)
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
-            if self.headers.get("Content-Type", "").startswith("application/json"):
+            content_type = self.headers.get("Content-Type", "")
+
+            # ---------- multipart: forward raw body untouched ----------
+            if content_type.startswith("multipart/form-data"):
+                sess = requests.Session()
+                if _proxy:
+                    sess.proxies = {"http": _proxy, "https": _proxy}
+                try:
+                    resp = sess.post(
+                        f"{bot.base_url}/{method}",
+                        data=raw,
+                        headers={"Content-Type": content_type},
+                        timeout=300,
+                    )
+                    payload = resp.content
+                except Exception as e:
+                    self._respond(502, json.dumps(
+                        {"ok": False, "description": str(e)}).encode())
+                    return
+                # try to persist any Message in the response
+                _try_persist_payload(payload)
+                self._respond(resp.status_code, payload)
+                return
+
+            # ---------- form / JSON body ----------
+            if content_type.startswith("application/json"):
                 try:
                     body_data = json.loads(raw) if raw else {}
                 except Exception:
                     body_data = {}
             else:
-                body_data = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "ignore")).items()}
+                body_data = {k: v[0] for k, v in
+                            urllib.parse.parse_qs(raw.decode("utf-8", "ignore")).items()}
             params = {k: v[0] for k, v in qs.items()}
             params.update(body_data)
 
-            sess = requests.Session()
-            if _proxy:
-                sess.proxies = {"http": _proxy, "https": _proxy}
-            try:
-                resp = sess.post(
-                    f"{bot.base_url}/{method}",
-                    data=params, timeout=60)
-                payload = resp.content
-                if method == "getUpdates":
+            # ---------- getUpdates: exclusive lock ----------
+            if method == "getUpdates":
+                if not acquire_getupdates_lock("api-server"):
+                    holder = getupdates_lock_holder() or {}
+                    err = json.dumps({
+                        "ok": False,
+                        "error_code": 503,
+                        "description": f"getUpdates unavailable: lock held by "
+                                    f"{holder.get('owner', '?')} "
+                                    f"(pid {holder.get('pid', '?')}, "
+                                    f"age {_fmt_age(holder.get('started', 0))})",
+                    }).encode()
+                    self._respond(503, err)
+                    return
+                try:
+                    sess = requests.Session()
+                    if _proxy:
+                        sess.proxies = {"http": _proxy, "https": _proxy}
+                    resp = sess.post(f"{bot.base_url}/{method}",
+                                    data=params, timeout=90)
+                    payload = resp.content
                     try:
                         js = resp.json()
                         if js.get("ok"):
                             _conn = sqlite3.connect(DB_FILE); db_init(_conn)
+                            _latest_uid = None
                             for upd in js.get("result", []):
                                 uid = upd.get("update_id", 0)
+                                _latest_uid = uid
                                 kind, obj = None, None
-                                for k in ("message", "edited_message", "channel_post", "edited_channel_post", "managed_bot"):
+                                for k in ("message", "edited_message",
+                                        "channel_post", "edited_channel_post",
+                                        "managed_bot"):
                                     if k in upd:
                                         kind, obj = k, upd[k]; break
                                 if obj is None:
-                                    db_store_update(_conn, uid, "non-message", upd); continue
+                                    db_store_update(_conn, uid, "non-message", upd)
+                                    continue
                                 if kind == "managed_bot":
-                                    mb = obj
                                     db_store_update(_conn, uid, "managed_bot", upd)
-                                    print(f"\n{G}📢 New managed bot created!{N}")
-                                    print(f"  Bot ID   : {mb.get('bot_id')}")
-                                    print(f"  Username : @{mb.get('username')}")
-                                    print(f"  Name     : {mb.get('name')}")
-                                    print(f"  Owner ID : {mb.get('user_id')}")
-                                    _tok = bot.get_managed_bot_token(mb.get('user_id'))
-                                    if _tok and _tok.get("ok"):
-                                        _new_token = _tok.get("result")
-                                        print(f"{G}✔ Token received: {_new_token}{N}")
-                                        try:
-                                            _conn.execute(
-                                                "INSERT OR REPLACE INTO managed_bots "
-                                                "(bot_id, username, first_name, token, added_at, "
-                                                " last_seen_at, updated_at) "
-                                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
-                                                 _new_token, db_utcnow(), db_utcnow(), db_utcnow()))
-                                            _conn.commit()
-                                        except Exception as e:
-                                            print(f"{Y}⚠ Could not save: {e}{N}")
                                     continue
                                 db_store_update(_conn, uid, kind, upd)
-                                db_process_message(_conn, uid, kind, obj)
+                                _d = db_process_message(_conn, uid, kind, obj)
+                                _record_mention_if_needed(_conn, _d, bot)
+                            if _latest_uid is not None:
+                                db_state_set(_conn, "offset", _latest_uid + 1)
+                            _conn.commit()
                             _conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"{Y}api-server persist warn: {e}{N}")
+                    self._respond(resp.status_code, payload)
+                finally:
+                    release_getupdates_lock()
+                return
+
+            # ---------- all other methods ----------
+            sess = requests.Session()
+            if _proxy:
+                sess.proxies = {"http": _proxy, "https": _proxy}
+            try:
+                resp = sess.post(f"{bot.base_url}/{method}",
+                                data=params, timeout=120)
+                payload = resp.content
+                _try_persist_payload(payload)   # ← save bot's own messages
                 self._respond(resp.status_code, payload)
             except Exception as e:
-                self._respond(502, json.dumps({"ok": False, "description": str(e)}).encode())
+                self._respond(502, json.dumps(
+                    {"ok": False, "description": str(e)}).encode())
 
         def log_message(self, *a, **k):
             pass
@@ -4514,145 +5049,247 @@ def create_managed_bot_link(bot: TelegramBot):
     print(f"  {link}")
     print(f"\n{Y}Share this link with users so they can create a bot managed by you.{N}")
 
+def _set_base_url_menu(bot: TelegramBot):
+    print(f"\n{B}--- Set Base URL ---{N}")
+    cur = get_config_base_url() or "(default: https://api.telegram.org)"
+    print(f"  Current: {cur}")
+    new_base = input("New base URL (empty = default, 'c' = cancel): ").strip()
+    if new_base.lower() == "c":
+        return
+    set_config_base_url(new_base)
+    _root = (new_base or "https://api.telegram.org").rstrip("/")
+    bot.base_url = f"{_root}/bot{bot.token}"
+    bot.file_api = f"{_root}/file/bot{bot.token}"
+    print(f"{G}✔ Base URL set to {_root}{N}")
+
+
+def settings_menu(bot: TelegramBot):
+    while True:
+        clear_screen()
+        header = [
+            f"\n{G}=============== Settings & Config ==============={N}",
+            "",
+        ]
+        groups = [
+            ("Network", [
+                (1, "Configure proxy / retry"),
+                (2, "Set Base URL"),
+            ]),
+            ("Bot", [
+                (3, "Manage bot token"),
+                (4, "Manage reactions"),
+            ]),
+            ("Chat Behavior", [
+                (5, "Lock / Unlock chat_id"),
+                (6, "Toggle guest chat mode"),
+            ]),
+            ("Server", [
+                (7, "API server"),
+            ]),
+        ]
+        footer = ["", "  0) Back to main menu", ""]
+        render_menu(header, groups, footer)
+
+        choice = input("choice: ").strip()
+        if not choice:
+            continue
+        if choice == "0":
+            return
+
+        actions = {
+            "1": lambda: configure_proxy_menu(bot),
+            "2": lambda: _set_base_url_menu(bot),
+            "3": lambda: manage_bot_token_menu(bot),
+            "4": lambda: manage_reactions_menu(),
+            "5": lambda: chat_id_lock_menu(),
+            "6": lambda: toggle_guest_chat_mode(),
+            "7": lambda: start_api_server_menu(bot),
+        }
+        action = actions.get(choice)
+        if not action:
+            continue
+
+        try:
+            clear_screen()
+            action()
+        except KeyboardInterrupt:
+            print(f"\n{Y}Cancelled.{N}")
+        except Exception as e:
+            print(f"{R}Error: {e}{N}")
+        input(f"\n{Y}Press Enter to return...{N}")
+
+def monitor_mode_locked(bot: TelegramBot):
+    """Wrapper: acquire lock, run monitor_mode, release lock."""
+    if not acquire_getupdates_lock("monitor"):
+        print(f"\n{R}✘ Cannot start Monitor Mode{N}")
+        print_lock_holder(prefix="  ")
+        print(f"{Y}  Stop the other component first.{N}")
+        return
+    try:
+        monitor_mode(bot)
+    finally:
+        release_getupdates_lock()
+
+
+def silent_fetch_locked(bot: TelegramBot):
+    """Wrapper: acquire lock, run silent_fetch, release lock."""
+    if not acquire_getupdates_lock("silent-fetch"):
+        print(f"\n{R}✘ Cannot start Silent Fetch{N}")
+        print_lock_holder(prefix="  ")
+        print(f"{Y}  Stop the other component first.{N}")
+        return
+    try:
+        silent_fetch(bot)
+    finally:
+        release_getupdates_lock()
 
 def main_menu(bot: TelegramBot):
-    last_choice = None
+    # Main menu structure — contiguous numbering, settings collapsed into #54.
+    groups_def = [
+        ("Send Messages", [
+            (1, "Text message"), (2, "Photo"),
+            (3, "Animation (GIF)"), (4, "Video"),
+            (5, "Document / File"), (6, "Audio"),
+            (7, "Voice"), (8, "Video note"),
+            (9, "Sticker"), (10, "Location"),
+            (11, "Contact"), (12, "Poll"),
+            (13, "Dice"), (14, "Reaction"),
+            (15, "Edit message"), (16, "Delete message"),
+        ]),
+        ("Chat Management", [
+            (17, "Leave chat"), (18, "Get chat info"),
+            (19, "Member count"), (20, "Pin message"),
+            (21, "Unpin message"), (22, "Forward message"),
+            (23, "Chat action"), (24, "Ban user"),
+            (25, "Unban user"), (26, "Set chat title"),
+            (27, "Set chat desc"), (28, "Set admin title"),
+            (29, "Set bot name"), (30, "Create invite link"),
+        ]),
+        ("Bot Profile", [
+            (31, "Bot info (getMe)"), (32, "Set bio (desc)"),
+            (33, "Set short bio"), (34, "Set profile photo"),
+            (35, "Remove photo"), (36, "Get current profile"),
+        ]),
+        ("Files", [
+            (37, "Download by id"), (38, "Upload & get id"),
+        ]),
+        ("Monitor & Data", [
+            (39, "Monitor mode"), (40, "Silent fetch"),
+            (41, "Chat explorer"), (42, "History viewer"),
+        ]),
+        ("Admin & Members", [
+            (43, "Member info"), (44, "Promote admin"),
+            (45, "Demote admin"), (46, "Set user title"),
+            (47, "Set member tag"), (48, "Chat members (DB)"),
+            (49, "Mention members"), (50, "User account info"),
+            (60, "User profile audios"),
+        ]),
+        ("Bot Management", [
+            (51, "Bot management"), (52, "Managed bot link"),
+            (53, "Purge DB data"),
+        ]),
+        ("Settings", [
+            (54, "Settings & Config"),
+        ]),
+    ]
+
+    actions = {
+        "1":  lambda: send_message(bot),
+        "2":  lambda: send_photo(bot),
+        "3":  lambda: send_animation(bot),
+        "4":  lambda: send_video(bot),
+        "5":  lambda: send_document(bot),
+        "6":  lambda: send_audio(bot),
+        "7":  lambda: send_voice(bot),
+        "8":  lambda: send_video_note(bot),
+        "9":  lambda: send_sticker(bot),
+        "10": lambda: send_location(bot),
+        "11": lambda: send_contact(bot),
+        "12": lambda: send_poll(bot),
+        "13": lambda: send_dice(bot),
+        "14": lambda: send_reaction(bot),
+        "15": lambda: edit_message(bot),
+        "16": lambda: delete_message(bot),
+        "17": lambda: leave_chat(bot),
+        "18": lambda: get_chat_info(bot),
+        "19": lambda: get_chat_member_count(bot),
+        "20": lambda: pin_message(bot),
+        "21": lambda: unpin_message(bot),
+        "22": lambda: forward_message(bot),
+        "23": lambda: send_chat_action_cmd(bot),
+        "24": lambda: ban_user(bot),
+        "25": lambda: unban_user(bot),
+        "26": lambda: set_chat_title(bot),
+        "27": lambda: set_chat_description(bot),
+        "28": lambda: set_admin_custom_title(bot),
+        "29": lambda: set_bot_global_name(bot),
+        "30": lambda: create_invite_link(bot),
+        "31": lambda: show_bot_info(bot),
+        "32": lambda: set_bot_description(bot),
+        "33": lambda: set_bot_short_description(bot),
+        "34": lambda: set_profile_photo(bot),
+        "35": lambda: remove_profile_photo(bot),
+        "36": lambda: get_bot_profile(bot),
+        "37": lambda: download_file_by_id(bot),
+        "38": lambda: upload_and_get_file_id(bot),
+        "39": lambda: monitor_mode_locked(bot),
+        "40": lambda: silent_fetch_locked(bot),
+        "41": lambda: chat_explorer(bot),
+        "42": lambda: chat_history_viewer(bot),
+        "43": lambda: get_chat_member_info(bot),
+        "44": lambda: promote_member(bot),
+        "45": lambda: demote_member(bot),
+        "46": lambda: set_user_custom_title(bot),
+        "47": lambda: set_chat_member_tag(bot),
+        "48": lambda: chat_members_menu(bot),
+        "49": lambda: mention_members_menu(bot),
+        "50": lambda: user_account_info(bot),
+        "51": lambda: bot_management_mode(bot),
+        "52": lambda: create_managed_bot_link(bot),
+        "53": lambda: db_purge_menu(bot),
+        "54": lambda: settings_menu(bot),
+        "60": lambda: user_profile_audios_menu(bot),
+    }
+
     while True:
+        clear_screen()
         _lock = get_locked_chat_id() or "(none)"
         _guest = "ON" if get_guest_chat_mode() else "OFF"
         _api = "ON" if load_config().get("api_server_enabled") else "OFF"
-        menu_lines = [
+        header = [
             f"\n{G}=============== Telegram Bot Sender ==============={N}",
             f"  {Y}Locked chat_id:{N} {_lock}   {Y}Guest:{N} {_guest}   {Y}API:{N} {_api}",
-            format_menu_row(1, "Text message", 2, "Photo"),
-            format_menu_row(3, "Animation (GIF)", 4, "Video"),
-            format_menu_row(5, "Document / File", 6, "Audio"),
-            format_menu_row(7, "Voice", 8, "Video note"),
-            format_menu_row(9, "Sticker", 10, "Location"),
-            format_menu_row(11, "Contact", 12, "Poll"),
-            format_menu_row(13, "Dice", 14, "Reaction"),
-            format_menu_row(15, "Edit message", 16, "Delete message"),
-            f"{B}--- Settings & Config -----------------------------{N}",
-            format_menu_row(50, "Manage bot token", 51, "Manage reactions"),
-            format_menu_row(17, "Configure proxy", 18, "Bot info (getMe)"),
-            f"{B}--- Chat Management -------------------------------{N}",
-            format_menu_row(19, "Leave chat", 20, "Get chat info"),
-            format_menu_row(21, "Member count", 22, "Pin message"),
-            format_menu_row(23, "Unpin message", 24, "Forward message"),
-            format_menu_row(25, "Chat action", 26, "Ban user"),
-            format_menu_row(27, "Unban user", 28, "Set chat title"),
-            format_menu_row(29, "Set chat desc", 30, "Set admin title"),
-            format_menu_row(31, "Set bot name", 32, "Create invite link"),
-            f"{B}--- Bot Profile -----------------------------------{N}",
-            format_menu_row(33, "Set bio (desc)", 34, "Set short bio"),
-            format_menu_row(35, "Set profile photo", 36, "Remove photo"),
-            "  49) Get current profile",
-            f"{B}--- Files -----------------------------------------{N}",
-            format_menu_row(37, "Download by id", 38, "Upload & get id"),
-            f"{B}--- Monitor ---------------------------------------{N}",
-            "  39) Monitor mode",
-            f"{B}--- Admin / Members -------------------------------{N}",
-            format_menu_row(41, "Member info", 42, "Promote admin"),
-            format_menu_row(43, "Demote admin", 44, "Set user title"),
-            "  45) Set member tag",
-            f"{B}--- Data / DB -------------------------------------{N}",
-            format_menu_row(46, "Silent fetch", 47, "Chat explorer"),
-            "  48) History viewer",
-            f"{B}--- Advanced -------------------------------------{N}",
-            format_menu_row(52, "API Server", 53, "Bot management"),
-            format_menu_row(54, "Purge DB data", 55, "Lock/Unlock chat_id"),
-            "  56) Toggle guest chat mode",
-            format_menu_row(57, "Chat members (DB)", 58, "Mention members"),
-            format_menu_row(59, "User account info", 60, "Managed bot link"),
             "",
-            "   0) Exit",
-            ""
         ]
-        render_animated_menu(menu_lines, delay=0.005)
+        footer = ["", "  0) Exit", ""]
+        render_menu(header, groups_def, footer)
 
         choice = input("choice: ").strip()
-        if choice == "" and last_choice:
-            choice = last_choice
-            print(f"{Y}↻ repeating choice {last_choice}{N}")
-        actions = {
-            "1":  lambda: send_message(bot),
-            "2":  lambda: send_photo(bot),
-            "3":  lambda: send_animation(bot),
-            "4":  lambda: send_video(bot),
-            "5":  lambda: send_document(bot),
-            "6":  lambda: send_audio(bot),
-            "7":  lambda: send_voice(bot),
-            "8":  lambda: send_video_note(bot),
-            "9":  lambda: send_sticker(bot),
-            "10": lambda: send_location(bot),
-            "11": lambda: send_contact(bot),
-            "12": lambda: send_poll(bot),
-            "13": lambda: send_dice(bot),
-            "14": lambda: send_reaction(bot),
-            "15": lambda: edit_message(bot),
-            "16": lambda: delete_message(bot),
-            "17": lambda: configure_proxy_menu(bot),
-            "18": lambda: show_bot_info(bot),
-            "19": lambda: leave_chat(bot),
-            "20": lambda: get_chat_info(bot),
-            "21": lambda: get_chat_member_count(bot),
-            "22": lambda: pin_message(bot),
-            "23": lambda: unpin_message(bot),
-            "24": lambda: forward_message(bot),
-            "25": lambda: send_chat_action_cmd(bot),
-            "26": lambda: ban_user(bot),
-            "27": lambda: unban_user(bot),
-            "28": lambda: set_chat_title(bot),
-            "29": lambda: set_chat_description(bot),
-            "30": lambda: set_admin_custom_title(bot),
-            "31": lambda: set_bot_global_name(bot),
-            "32": lambda: create_invite_link(bot),
-            "33": lambda: set_bot_description(bot),
-            "34": lambda: set_bot_short_description(bot),
-            "35": lambda: set_profile_photo(bot),
-            "36": lambda: remove_profile_photo(bot),
-            "37": lambda: download_file_by_id(bot),
-            "38": lambda: upload_and_get_file_id(bot),
-            "39": lambda: monitor_mode(bot),
-            "41": lambda: get_chat_member_info(bot),
-            "42": lambda: promote_member(bot),
-            "43": lambda: demote_member(bot),
-            "44": lambda: set_user_custom_title(bot),
-            "45": lambda: set_chat_member_tag(bot),
-            "46": lambda: silent_fetch(bot),
-            "47": lambda: chat_explorer(bot),
-            "48": lambda: chat_history_viewer(bot),
-            "49": lambda: get_bot_profile(bot),
-            "50": lambda: manage_bot_token_menu(bot),
-            "51": lambda: manage_reactions_menu(),
-            "52": lambda: start_api_server_menu(bot),
-            "53": lambda: bot_management_mode(bot),
-            "54": lambda: db_purge_menu(bot),
-            "55": lambda: chat_id_lock_menu(),
-            "56": lambda: toggle_guest_chat_mode(),
-            "57": lambda: chat_members_menu(bot),
-            "58": lambda: mention_members_menu(bot),
-            "59": lambda: user_account_info(bot),
-            "60": lambda: create_managed_bot_link(bot),
-            "0":  lambda: None,
-        }
+
+        # 1) empty Enter → reload the menu (was: repeat last choice)
+        if not choice:
+            continue
 
         if choice == "0":
             print("Bye.")
             break
 
         action = actions.get(choice)
-        if action:
-            try:
-                action()
-                if choice and choice != "0":
-                    last_choice = choice
-            except KeyboardInterrupt:
-                print(f"\n{Y}Cancelled.{N}")
-            except Exception as e:
-                print(f"{R}Error: {e}{N}")
-        else:
-            print(f"{R}invalid choice{N}")
+        # 2) invalid number → also reload
+        if not action:
+            continue
+
+        # 3) clear before running the action
+        try:
+            clear_screen()
+            action()
+        except KeyboardInterrupt:
+            print(f"\n{Y}Cancelled.{N}")
+        except Exception as e:
+            print(f"{R}Error: {e}{N}")
+
+        # 4) pause before returning to main menu
+        input(f"\n{Y}Press Enter to return to main menu...{N}")
 
 
 # ================================================================
@@ -4675,10 +5312,10 @@ def _cli_send_file(bot: TelegramBot, method: str, field: str,
                    reply_to: Optional[int] = None,
                    parse_mode: Optional[str] = None,
                    reply_to_chat: Optional[str] = None) -> int:
-    """Generic file sender used by several CLI subcommands."""
     data = {"chat_id": chat_id}
     files = None
     if path and os.path.isfile(path):
+        pf = ProgressFileReader(path)
         files = {field: (os.path.basename(path), open(path, "rb"), guess_mime(path))}
     elif path:
         data[field] = path  # file_id or URL
@@ -6387,101 +7024,87 @@ def _derive_filename(file_unique_id: str, file_name: Optional[str],
 
 def _web_poller_thread(bot: TelegramBot, interval: int, timeout: int,
                        stop_event: threading.Event):
-    """Background poller: fetch getUpdates and store in tg.db while web UI runs."""
     try:
-        conn = sqlite3.connect(DB_FILE)
-        db_init(conn)
-        offset = int(db_state_get(conn, "offset", "0") or "0")
-        conn.close()
-    except Exception as e:
-        print(f"{Y}web poller: could not read offset: {e}{N}")
-        return
-
-    while not stop_event.is_set():
         try:
-            resp = bot.get("getUpdates", params={
-                "offset": offset, "limit": 100, "timeout": timeout,
-                "allowed_updates": [
-                    "message", "edited_message",
-                    "channel_post", "edited_channel_post",
-                    "message_reaction", "message_reaction_count",
-                    "managed_bot",
-                ],
-            }, ask_retry=False)
-            if not resp or not resp.get("ok"):
-                stop_event.wait(interval)
-                continue
-
-            updates = resp.get("result", [])
-            if not updates:
-                continue
-
             conn = sqlite3.connect(DB_FILE)
             db_init(conn)
-            for upd in updates:
-                uid = upd.get("update_id", 0)
-                offset = uid + 1
-                if "message_reaction" in upd:
-                    _handle_reaction_update(conn, upd["message_reaction"])
-                    db_store_update(conn, uid, "message_reaction", upd)
-                    continue
-                if "message_reaction_count" in upd:
-                    _handle_reaction_count_update(
-                        conn, upd["message_reaction_count"])
-                    db_store_update(conn, uid, "message_reaction_count", upd)
-                    continue
-                kind, obj = None, None
-                for k in ("message", "edited_message",
-                          "channel_post", "edited_channel_post",
-                          "managed_bot"):
-                    if k in upd:
-                        kind, obj = k, upd[k]
-                        break
-                if obj is None:
-                    db_store_update(conn, uid, "non-message", upd)
-                    continue
-                if kind == "managed_bot":
-                    mb = obj
-                    db_store_update(conn, uid, "managed_bot", upd)
-                    print(f"\n{G}📢 New managed bot created!{N}")
-                    print(f"  Bot ID   : {mb.get('bot_id')}")
-                    print(f"  Username : @{mb.get('username')}")
-                    print(f"  Name     : {mb.get('name')}")
-                    print(f"  Owner ID : {mb.get('user_id')}")
-                    tok_resp = bot.get_managed_bot_token(mb.get('user_id'))
-                    if tok_resp and tok_resp.get("ok"):
-                        new_token = tok_resp.get("result")
-                        print(f"{G}✔ Token received: {new_token}{N}")
-                        try:
-                            conn.execute(
-                                "INSERT OR REPLACE INTO managed_bots "
-                                "(bot_id, username, first_name, token, added_at, "
-                                " last_seen_at, updated_at) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (mb.get('bot_id'), mb.get('username'), mb.get('name'),
-                                 new_token, db_utcnow(), db_utcnow(), db_utcnow()))
-                            conn.commit()
-                        except Exception as e:
-                            print(f"{Y}⚠ Could not save to managed_bots: {e}{N}")
-                    continue
-                db_store_update(conn, uid, kind, upd)
-                _descr = db_process_message(conn, uid, kind, obj)
-                _record_mention_if_needed(conn, _descr, bot)
-            db_state_set(conn, "offset", offset)
-            conn.commit()
+            offset = int(db_state_get(conn, "offset", "0") or "0")
             conn.close()
         except Exception as e:
-            if stop_event.is_set():
-                break
-            print(f"{Y}web poller error: {e}{N}")
-            stop_event.wait(interval * 2)
+            print(f"{Y}web poller: could not read offset: {e}{N}")
+            return
 
-_web_poller_state = {"thread": None, "stop_event": None}
+        while not stop_event.is_set():
+            try:
+                resp = bot.get("getUpdates", params={
+                    "offset": offset, "limit": 100, "timeout": timeout,
+                    "allowed_updates": [
+                        "message", "edited_message",
+                        "channel_post", "edited_channel_post",
+                        "message_reaction", "message_reaction_count",
+                        "managed_bot",
+                    ],
+                }, ask_retry=False)
+                if not resp or not resp.get("ok"):
+                    stop_event.wait(interval)
+                    continue
+
+                updates = resp.get("result", [])
+                if not updates:
+                    continue
+
+                conn = sqlite3.connect(DB_FILE)
+                db_init(conn)
+                for upd in updates:
+                    uid = upd.get("update_id", 0)
+                    offset = uid + 1
+                    if "message_reaction" in upd:
+                        _handle_reaction_update(conn, upd["message_reaction"])
+                        db_store_update(conn, uid, "message_reaction", upd)
+                        continue
+                    if "message_reaction_count" in upd:
+                        _handle_reaction_count_update(
+                            conn, upd["message_reaction_count"])
+                        db_store_update(conn, uid, "message_reaction_count", upd)
+                        continue
+                    kind, obj = None, None
+                    for k in ("message", "edited_message",
+                              "channel_post", "edited_channel_post",
+                              "managed_bot"):
+                        if k in upd:
+                            kind, obj = k, upd[k]
+                            break
+                    if obj is None:
+                        db_store_update(conn, uid, "non-message", upd)
+                        continue
+                    if kind == "managed_bot":
+                        db_store_update(conn, uid, "managed_bot", upd)
+                        continue
+                    db_store_update(conn, uid, kind, upd)
+                    _descr = db_process_message(conn, uid, kind, obj)
+                    _record_mention_if_needed(conn, _descr, bot)
+                db_state_set(conn, "offset", offset)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                if stop_event.is_set():
+                    break
+                print(f"{Y}web poller error: {e}{N}")
+                stop_event.wait(interval * 2)
+    finally:
+        # lock is released when the thread exits
+        if _lock_owner == "web-poller":
+            release_getupdates_lock()
+
 
 def _start_web_poller(bot: TelegramBot, interval: int = 2,
                       timeout: int = 30) -> bool:
     if _web_poller_state["thread"] and _web_poller_state["thread"].is_alive():
         return True
+    if not acquire_getupdates_lock("web-poller"):
+        print(f"{Y}⚠ Web poller: lock held by "
+              f"{(getupdates_lock_holder() or {}).get('owner', '?')}{N}")
+        return False
     stop_event = threading.Event()
     t = threading.Thread(
         target=_web_poller_thread,
@@ -6492,9 +7115,11 @@ def _start_web_poller(bot: TelegramBot, interval: int = 2,
     _web_poller_state.update({"thread": t, "stop_event": stop_event})
     return True
 
+
 def _stop_web_poller() -> bool:
     if _web_poller_state["stop_event"]:
         _web_poller_state["stop_event"].set()
+    # don't release here — the thread does it in its finally block
     _web_poller_state.update({"thread": None, "stop_event": None})
     return True
 
@@ -6515,6 +7140,81 @@ def _get_avatar_lock(user_id):
             _avatar_locks[user_id] = threading.Lock()
         return _avatar_locks[user_id]
 
+def user_profile_audios_menu(bot: TelegramBot):
+    """Browse + download a user's profile songs.
+       After listing, type the number of a song to download it directly."""
+    print(f"\n{B}--- User Profile Audios ---{N}")
+    user_id = input("user_id (numeric): ").strip()
+    if not user_id.lstrip('-').isdigit():
+        print(f"{R}user_id must be numeric{N}")
+        return
+
+    print(f"{Y}>> getUserProfileAudios ...{N}")
+    r = bot.post("getUserProfileAudios",
+                 data={"user_id": user_id, "limit": "100"})
+    if not r or not r.get("ok"):
+        desc = (r.get("description") if isinstance(r, dict) else "no response")
+        print(f"{R}✘ Failed: {desc}{N}")
+        return
+
+    audios = (r.get("result") or {}).get("audios") or []
+    if not audios:
+        print(f"{Y}No profile audios.{N}")
+        return
+
+    # choose output dir once
+    out_dir = input(f"output dir [default: .]: ").strip() or "."
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception as e:
+        print(f"{R}✘ Cannot create {out_dir}: {e}{N}")
+        return
+
+    while True:
+        print(f"\n{B}--- {len(audios)} profile audio(s) ---{N}")
+        for i, a in enumerate(audios, 1):
+            print(f"  {i:>3}) 🎵 {a.get('title', '?')} "
+                  f"— {a.get('performer', '?')}")
+            print(f"       duration={a.get('duration', '?')}s  "
+                  f"size={a.get('file_size', '?')}B")
+        print(f"\n  {Y}type a number to download that song{N}")
+        print("  a) Download all   j) Export JSON   0) Back")
+
+        c = input("choice: ").strip().lower()
+
+        if c == "0":
+            return
+
+        # ---- number → download directly ----
+        if c.isdigit():
+            idx = int(c)
+            if 1 <= idx <= len(audios):
+                a = audios[idx - 1]
+                _download_by_file_id(bot, a.get("file_id"), a, out_dir)
+            else:
+                print(f"{R}invalid number (1..{len(audios)}){N}")
+            continue
+
+        if c == "j":
+            fname = f"audios_{user_id}_{int(time.time())}.json"
+            with open(fname, "w", encoding="utf-8") as f:
+                json.dump(audios, f, indent=2, ensure_ascii=False)
+            print(f"{G}✔ Saved {len(audios)} audio metadata to {fname}{N}")
+            continue
+
+        if c == "a":
+            print(f"{Y}Downloading {len(audios)} file(s) to {out_dir} ...{N}")
+            ok = fail = 0
+            for i, a in enumerate(audios, 1):
+                print(f"  [{i}/{len(audios)}] {a.get('title', '?')}")
+                if _download_by_file_id(bot, a.get("file_id"), a, out_dir):
+                    ok += 1
+                else:
+                    fail += 1
+            print(f"\n{G}✔ Done: {ok} saved, {fail} failed → {out_dir}{N}")
+            continue
+
+        print(f"{R}unknown choice (type a number, a, j, or 0){N}")
 
 def _fetch_user_photo(bot, user_id, cache_dir):
     """Return (local_path, mime) for the user's current profile photo.
@@ -7588,11 +8288,13 @@ Examples:
             "sticker":   ("sendSticker",   "sticker"),
         }[args.as_type]
         method, field = method_field
+        pf = ProgressFileReader(args.path)
         files = {field: (os.path.basename(args.path),
                          open(args.path, "rb"),
                          guess_mime(args.path))}
         resp = bot.post(method, data={"chat_id": args.chat_id},
                         files=files, ask_retry=False)
+        finish_progress()
         if not resp or not resp.get("ok"):
             show_info_result(resp)
             return 1
