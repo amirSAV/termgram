@@ -7022,6 +7022,8 @@ def _derive_filename(file_unique_id: str, file_name: Optional[str],
     base = file_name or f"{file_type or 'file'}_{file_unique_id}"
     return os.path.splitext(base)[0] + ext
 
+_web_poller_state = {"thread": None, "stop_event": None}
+
 def _web_poller_thread(bot: TelegramBot, interval: int, timeout: int,
                        stop_event: threading.Event):
     try:
